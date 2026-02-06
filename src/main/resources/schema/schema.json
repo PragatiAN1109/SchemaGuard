@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schema/plan.json",
+  "title": "Plan",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "_org",
+    "objectId",
+    "objectType",
+    "planType",
+    "creationDate",
+    "planCostShares",
+    "linkedPlanServices"
+  ],
+  "properties": {
+    "_org": { "type": "string", "minLength": 1 },
+    "objectId": { "type": "string", "minLength": 1 },
+    "objectType": { "type": "string", "const": "plan" },
+    "planType": { "type": "string", "minLength": 1 },
+    "creationDate": {
+      "type": "string",
+      "pattern": "^\\d{2}-\\d{2}-\\d{4}$"
+    },
+    "planCostShares": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["deductible", "copay", "_org", "objectId", "objectType"],
+      "properties": {
+        "deductible": { "type": "number" },
+        "copay": { "type": "number" },
+        "_org": { "type": "string", "minLength": 1 },
+        "objectId": { "type": "string", "minLength": 1 },
+        "objectType": { "type": "string", "const": "membercostshare" }
+      }
+    },
+    "linkedPlanServices": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["_org", "objectId", "objectType", "linkedService", "planserviceCostShares"],
+        "properties": {
+          "_org": { "type": "string", "minLength": 1 },
+          "objectId": { "type": "string", "minLength": 1 },
+          "objectType": { "type": "string", "const": "planservice" },
+
+          "linkedService": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["_org", "objectId", "objectType", "name"],
+            "properties": {
+              "_org": { "type": "string", "minLength": 1 },
+              "objectId": { "type": "string", "minLength": 1 },
+              "objectType": { "type": "string", "const": "service" },
+              "name": { "type": "string", "minLength": 1 }
+            }
+          },
+
+          "planserviceCostShares": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["deductible", "copay", "_org", "objectId", "objectType"],
+            "properties": {
+              "deductible": { "type": "number" },
+              "copay": { "type": "number" },
+              "_org": { "type": "string", "minLength": 1 },
+              "objectId": { "type": "string", "minLength": 1 },
+              "objectType": { "type": "string", "const": "membercostshare" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
