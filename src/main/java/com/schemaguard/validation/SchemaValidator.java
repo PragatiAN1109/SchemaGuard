@@ -2,32 +2,28 @@ package com.schemaguard.validation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.networknt.schema.JsonSchema;
-import com.networknt.schema.JsonSchemaFactory;
-import com.networknt.schema.SpecVersion;
-import com.networknt.schema.ValidationMessage;
+import com.networknt.schema.*;
+
+import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@Component
 public class SchemaValidator {
 
     private static final String PLAN_SCHEMA_PATH = "/schema/schema.json";
 
     private final ObjectMapper objectMapper;
-    private final JsonSchema planSchema; // cached at startup
+    private final JsonSchema planSchema;
 
-    public SchemaValidator() {
-        this.objectMapper = new ObjectMapper();
+    public SchemaValidator(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
         this.planSchema = loadSchema(PLAN_SCHEMA_PATH);
     }
 
-    /**
-     * Validates the raw JSON string against the Plan schema.
-     * Throws SchemaValidationException if invalid.
-     */
     public void validatePlanJson(String rawJson) {
         try {
             JsonNode node = objectMapper.readTree(rawJson);
@@ -53,7 +49,6 @@ public class SchemaValidator {
         if (is == null) {
             throw new IllegalStateException("Schema not found on classpath: " + classpathLocation);
         }
-
         JsonSchemaFactory factory = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
         return factory.getSchema(is);
     }
