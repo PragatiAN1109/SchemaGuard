@@ -13,8 +13,8 @@ public class EtagUtil {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hashBytes = digest.digest(json.getBytes(StandardCharsets.UTF_8));
             String hex = toHex(hashBytes);
-            // Return quoted ETag to match common HTTP practice
-            return "\"" + hex + "\"";
+            // Return unquoted ETag - Spring's .eTag() method will add quotes
+            return hex;
         } catch (NoSuchAlgorithmException e) {
             // SHA-256 always exists in Java, but handle defensively
             throw new IllegalStateException("SHA-256 not available", e);
