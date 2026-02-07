@@ -1,5 +1,7 @@
 package com.schemaguard.controller;
 
+import com.schemaguard.exception.ConflictException;
+import com.schemaguard.exception.NotFoundException;
 import com.schemaguard.model.StoredDocument;
 import com.schemaguard.store.KeyValueStore;
 import com.schemaguard.util.JsonUtil;
@@ -47,7 +49,7 @@ public class PlanController {
 
         // 3) Conflict if exists
         if (store.exists(objectId)) {
-            return ResponseEntity.status(409).body(errorBody("CONFLICT", "Plan with objectId already exists: " + objectId));
+            throw new ConflictException("Plan with objectId already exists: " + objectId);
         }
 
         // 4) Store (store computes etag + lastModified internally)
@@ -82,9 +84,7 @@ public class PlanController {
         Optional<StoredDocument> docOpt = store.get(objectId);
 
         if (docOpt.isEmpty()) {
-            return ResponseEntity.status(404)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body("{\"error\":\"NOT_FOUND\",\"message\":\"Plan not found\"}");
+            throw new NotFoundException("Plan not found: " + objectId);
         }
 
         StoredDocument doc = docOpt.get();
@@ -108,7 +108,7 @@ public class PlanController {
     public ResponseEntity<Void> deletePlan(@PathVariable String objectId) {
         boolean deleted = store.delete(objectId);
         if (!deleted) {
-            return ResponseEntity.status(404).build();
+            throw new NotFoundException("Plan not found: " + objectId);
         }
         return ResponseEntity.noContent().build(); // 204
     }
