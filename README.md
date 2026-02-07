@@ -71,7 +71,7 @@ The application will start on the default port 8080.
 
 ### Create a Plan
 
-**Endpoint:** `POST /api/v1/plans`
+**Endpoint:** `POST /api/v1/plan`
 
 **Description:** Creates a new insurance plan. The request body must conform to the JSON schema defined in `src/main/resources/schema/schema.json`.
 
@@ -120,7 +120,7 @@ The application will start on the default port 8080.
 **Success Response:**
 - Status Code: `201 Created`
 - Headers: 
-  - `Location: /api/v1/plans/{objectId}`
+  - `Location: /api/v1/plan/{objectId}`
   - `ETag: {etag-value}`
 - Body:
 ```json
@@ -136,7 +136,7 @@ The application will start on the default port 8080.
 
 ### Retrieve a Plan
 
-**Endpoint:** `GET /api/v1/plans/{objectId}`
+**Endpoint:** `GET /api/v1/plan/{objectId}`
 
 **Description:** Retrieves an insurance plan by its objectId. Supports conditional GET using ETag.
 
@@ -163,7 +163,7 @@ The application will start on the default port 8080.
 
 ### Delete a Plan
 
-**Endpoint:** `DELETE /api/v1/plans/{objectId}`
+**Endpoint:** `DELETE /api/v1/plan/{objectId}`
 
 **Description:** Deletes an insurance plan by its objectId.
 
@@ -277,25 +277,25 @@ To test the API:
 
 Create a plan:
 ```bash
-curl -X POST http://localhost:8080/api/v1/plans \
+curl -X POST http://localhost:8080/api/v1/plan \
   -H "Content-Type: application/json" \
   -d @samples/plan.json
 ```
 
 Get a plan:
 ```bash
-curl -X GET http://localhost:8080/api/v1/plans/12xvxc345ssdsds-508
+curl -X GET http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
 ```
 
 Get a plan with ETag:
 ```bash
-curl -X GET http://localhost:8080/api/v1/plans/12xvxc345ssdsds-508 \
+curl -X GET http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "If-None-Match: {etag-value}"
 ```
 
 Delete a plan:
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/plans/12xvxc345ssdsds-508
+curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
 ```
 
 ## Error Handling
