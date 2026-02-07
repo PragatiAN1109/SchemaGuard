@@ -1,34 +1,38 @@
 # SchemaGuard
 
-A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation and ETag support for efficient caching.
+A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag support for efficient caching, and Redis integration for persistent storage.
 
 ## Overview
 
-SchemaGuard is a RESTful web service that provides CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation to ensure data integrity and supports conditional GET requests using ETags for optimized caching.
+SchemaGuard is a RESTful web service that provides CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation to ensure data integrity and supports conditional GET requests using ETags for optimized caching. The application supports both in-memory and Redis-based storage.
 
 ## Features
 
 - JSON Schema Validation for all incoming plan data
 - RESTful API with standard HTTP methods (POST, GET, DELETE)
 - ETag support for conditional GET requests
-- In-memory data storage with conflict detection
+- Dual storage options: In-memory or Redis
 - Comprehensive error handling with detailed validation messages
 - Maven-based build system
 - Spring Boot 4.0.2 framework
+- Profile-based configuration for different storage backends
 
 ## Technology Stack
 
 - Java 17
 - Spring Boot 4.0.2
 - Spring Web MVC
+- Spring Data Redis
 - Jackson for JSON processing
 - NetworkNT JSON Schema Validator (v1.0.87)
+- Redis (optional, for persistent storage)
 - Maven 3.x
 
 ## Prerequisites
 
 - Java Development Kit (JDK) 17 or higher
 - Maven 3.6 or higher (or use the included Maven wrapper)
+- Redis Server (optional, for Redis storage mode)
 
 ## Getting Started
 
@@ -53,19 +57,53 @@ Or with system Maven:
 mvn clean install
 ```
 
-### Run the Application
+### Run with In-Memory Storage (Default)
 
 ```bash
 ./mvnw spring-boot:run
 ```
 
-Or:
+### Run with Redis Storage
 
+First, start Redis:
 ```bash
-mvn spring-boot:run
+redis-server
 ```
 
+Then uncomment Redis configuration in `src/main/resources/application.properties`:
+```properties
+spring.profiles.active=redis
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+```
+
+Run the application:
+```bash
+./mvnw spring-boot:run
+```
+
+For detailed Redis setup instructions, see [REDIS_SETUP.md](REDIS_SETUP.md).
+
+For quick Redis demo commands, see [REDIS_DEMO_COMMANDS.md](REDIS_DEMO_COMMANDS.md).
+
 The application will start on the default port 8080.
+
+## Storage Options
+
+### In-Memory Storage (Default)
+- Fast performance
+- No external dependencies
+- Data lost on application restart
+- Best for development and testing
+
+### Redis Storage
+- Persistent storage (data survives application restarts)
+- Real-time data visibility via redis-cli
+- Configurable TTL (Time To Live)
+- Production-ready
+- Best for demos and production deployments
+
+Switch between modes by setting `spring.profiles.active` in `application.properties`.
 
 ## API Endpoints
 
@@ -176,6 +214,23 @@ The application will start on the default port 8080.
 **Error Response:**
 - `404 Not Found` - Plan with specified objectId does not exist
 
+## Viewing Data in Redis
+
+When using Redis storage, you can view stored data in real-time:
+
+```bash
+# List all plan keys
+redis-cli KEYS "plan:*"
+
+# View a specific plan
+redis-cli GET "plan:12xvxc345ssdsds-508"
+
+# Monitor all Redis operations in real-time
+redis-cli MONITOR
+```
+
+See [REDIS_DEMO_COMMANDS.md](REDIS_DEMO_COMMANDS.md) for comprehensive Redis commands.
+
 ## JSON Schema
 
 The application validates all plan data against a JSON Schema located at `src/main/resources/schema/schema.json`. The schema defines the required structure for insurance plans, including:
@@ -240,7 +295,9 @@ SchemaGuard/
 │   └── test/                             # Test classes
 ├── samples/                              # Sample JSON files
 ├── pom.xml                               # Maven configuration
-└── README.md                             # This file
+├── README.md                             # This file
+├── REDIS_SETUP.md                        # Redis setup guide
+└── REDIS_DEMO_COMMANDS.md                # Quick Redis commands reference
 ```
 
 ### Key Components
@@ -254,13 +311,18 @@ SchemaGuard/
 
 **Storage:**
 - `KeyValueStore` - Interface for data storage operations
-- `InMemoryKeyValueStore` - In-memory implementation (data is not persistent)
+- `InMemoryKeyValueStore` - In-memory implementation (default)
+- `RedisKeyValueStore` - Redis implementation (persistent storage)
+
+**Configuration:**
+- `RedisConfig` - Redis connection and serialization configuration
 
 **Models:**
 - `StoredDocument` - Internal representation of stored plans with metadata
 
 **Utilities:**
 - `JsonUtil` - Helper methods for JSON processing
+- `EtagUtil` - ETag generation utilities
 
 ## Testing
 
@@ -335,28 +397,45 @@ The application provides detailed error messages for various scenarios:
 Application configuration can be modified in `src/main/resources/application.properties`.
 
 Default settings:
-- Server port: 8080 (Spring Boot default)
-- Context path: /
+```properties
+# Server Configuration
+server.port=8080
+
+# Redis Configuration (uncomment to enable Redis)
+#spring.profiles.active=redis
+#spring.data.redis.host=localhost
+#spring.data.redis.port=6379
+#spring.data.redis.timeout=60000
+```
 
 ## Important Notes
 
 ### Data Persistence
 
-The current implementation uses in-memory storage. All data will be lost when the application restarts. For production use, consider implementing a persistent storage solution (database, Redis, etc.) by creating a new implementation of the `KeyValueStore` interface.
+**In-Memory Mode (Default):**
+- Data is lost when the application restarts
+- No external dependencies required
+- Best for development and testing
+
+**Redis Mode:**
+- Data persists between application restarts
+- Configurable TTL (currently set to 24 hours)
+- Data visible in real-time via redis-cli
+- Best for demos and production
 
 ### ETag Implementation
 
-ETags are automatically generated for each plan based on the JSON content and last modification time. The application supports conditional GET requests to optimize bandwidth usage and reduce server load.
+ETags are automatically generated for each plan using SHA-256 hashing of the JSON content. The application supports conditional GET requests to optimize bandwidth usage and reduce server load.
 
 ### Concurrency
 
-The in-memory store implementation includes thread-safe operations to handle concurrent requests safely.
+Both storage implementations include thread-safe operations to handle concurrent requests safely.
 
 ## Future Enhancements
 
 Potential improvements for production deployment:
-- Persistent database integration (PostgreSQL, MongoDB, etc.)
-- Redis integration for distributed caching
+- Database integration (PostgreSQL, MongoDB, etc.)
+- Redis clustering for high availability
 - Authentication and authorization
 - Rate limiting
 - Comprehensive unit and integration tests
@@ -386,4 +465,5 @@ For questions or issues, please open an issue in the GitHub repository.
 
 - Spring Boot team for the excellent framework
 - NetworkNT for the JSON Schema validator library
+- Redis Labs for Redis
 - JSON Schema specification contributors
