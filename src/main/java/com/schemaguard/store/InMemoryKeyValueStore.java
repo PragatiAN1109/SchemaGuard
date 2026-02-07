@@ -2,6 +2,7 @@ package com.schemaguard.store;
 
 import com.schemaguard.model.StoredDocument;
 import com.schemaguard.util.EtagUtil;
+import org.springframework.context.annotation.Primary;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
@@ -10,6 +11,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
+@Primary
 @Profile("!redis")
 public class InMemoryKeyValueStore implements KeyValueStore {
 
