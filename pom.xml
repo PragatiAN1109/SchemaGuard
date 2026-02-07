@@ -11,7 +11,7 @@
     <groupId>com</groupId>
     <artifactId>SchemaGuard</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>SchemaGuard</name>
+    <n>SchemaGuard</n>
     <description>SchemaGuard</description>
     <url/>
     <licenses>
@@ -45,6 +45,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
+        </dependency>
+
+        <!-- Redis support -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
         <!-- JSON Schema validation -->
