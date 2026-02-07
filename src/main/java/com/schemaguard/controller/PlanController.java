@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 
 @RestController
-@RequestMapping("/api/v1/plans")
+@RequestMapping("/api/v1/plan")
 public class PlanController {
 
     private final KeyValueStore store;
@@ -32,7 +32,7 @@ public class PlanController {
     }
 
     // ---------------------------
-    // POST /api/v1/plans
+    // POST /api/v1/plan
     // ---------------------------
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> createPlan(@RequestBody String rawJson) {
@@ -67,14 +67,14 @@ public class PlanController {
         response.put("etag", doc.getEtag());
 
         return ResponseEntity.status(201)
-                .header(HttpHeaders.LOCATION, "/api/v1/plans/" + objectId)
+                .header(HttpHeaders.LOCATION, "/api/v1/plan/" + objectId)
                 .eTag(doc.getEtag())
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(response);
     }
 
     // ---------------------------
-    // GET /api/v1/plans/{objectId}  (Conditional GET)
+    // GET /api/v1/plan/{objectId}  (Conditional GET)
     // ---------------------------
     @GetMapping(value = "/{objectId}", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> getPlan(
@@ -102,7 +102,7 @@ public class PlanController {
     }
 
     // ---------------------------
-    // DELETE /api/v1/plans/{objectId}
+    // DELETE /api/v1/plan/{objectId}
     // ---------------------------
     @DeleteMapping("/{objectId}")
     public ResponseEntity<Void> deletePlan(@PathVariable String objectId) {
