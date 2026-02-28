@@ -8,7 +8,6 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 @Component
 @Profile("redis")
@@ -30,7 +29,8 @@ public class RedisKeyValueStore implements KeyValueStore {
         }
         String etag = EtagUtil.sha256Etag(jsonString);
         StoredDocument doc = new StoredDocument(objectId, jsonString, etag, Instant.now());
-        redisTemplate.opsForValue().set(key, doc, 24, TimeUnit.HOURS);
+        // No TTL — data persists until explicitly deleted or Redis is flushed
+        redisTemplate.opsForValue().set(key, doc);
         return true;
     }
 
@@ -50,7 +50,8 @@ public class RedisKeyValueStore implements KeyValueStore {
         }
         String etag = EtagUtil.sha256Etag(jsonString);
         StoredDocument updated = new StoredDocument(objectId, jsonString, etag, Instant.now());
-        redisTemplate.opsForValue().set(key, updated, 24, TimeUnit.HOURS);
+        // No TTL — data persists until explicitly deleted
+        redisTemplate.opsForValue().set(key, updated);
         return true;
     }
 
