@@ -18,6 +18,12 @@ public interface KeyValueStore {
     Optional<StoredDocument> get(String objectId);
 
     /**
+     * Replaces an existing entry. Generates new ETag + lastModified.
+     * @return true if updated, false if key does not exist
+     */
+    boolean update(String objectId, String jsonString);
+
+    /**
      * Deletes an entry by id.
      * @return true if deleted, false if not found
      */
