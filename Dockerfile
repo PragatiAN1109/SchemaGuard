@@ -1,5 +1,6 @@
 # ── Stage 1: Build ──────────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jdk-alpine AS build
+# eclipse-temurin:17-jdk supports linux/amd64 and linux/arm64 (Apple Silicon)
+FROM eclipse-temurin:17-jdk AS build
 WORKDIR /app
 
 # Copy Maven wrapper and pom first (layer cache for dependencies)
@@ -8,16 +9,17 @@ COPY .mvn .mvn
 COPY pom.xml .
 RUN ./mvnw dependency:go-offline -q
 
-# Copy source and build (skip tests — tests use in-memory store and don't need Redis)
+# Copy source and build (skip tests — tests use in-memory store, no Redis needed)
 COPY src src
 RUN ./mvnw package -DskipTests -q
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jre-alpine
+# eclipse-temurin:17-jre supports linux/amd64 and linux/arm64
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 
 # Non-root user for security
-RUN addgroup -S schemaguard && adduser -S schemaguard -G schemaguard
+RUN groupadd -r schemaguard && useradd -r -g schemaguard schemaguard
 USER schemaguard
 
 COPY --from=build /app/target/SchemaGuard-0.0.1-SNAPSHOT.jar app.jar
