@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schema/plan.json",
+  "title": "Plan",
+  "description": "JSON Schema for a healthcare insurance plan. All write operations (POST, PUT, PATCH) validate against this schema.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "_org",
+    "objectId",
+    "objectType",
+    "planType",
+    "creationDate",
+    "planCostShares",
+    "linkedPlanServices"
+  ],
+  "properties": {
+    "_org": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Organization identifier (e.g. example.com)"
+    },
+    "objectId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this plan"
+    },
+    "objectType": {
+      "type": "string",
+      "const": "plan",
+      "description": "Must always be 'plan'"
+    },
+    "planType": {
+      "type": "string",
+      "enum": ["inNetwork", "outOfNetwork"],
+      "description": "Plan network type"
+    },
+    "creationDate": {
+      "type": "string",
+      "pattern": "^\\d{2}-\\d{2}-\\d{4}$",
+      "description": "Date the plan was created, format DD-MM-YYYY"
+    },
+    "planCostShares": {
+      "type": "object",
+      "description": "Top-level cost sharing details for the plan",
+      "additionalProperties": true,
+      "required": ["deductible", "copay", "_org", "objectId", "objectType"],
+      "properties": {
+        "deductible": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Annual deductible amount"
+        },
+        "copay": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Copay amount per visit"
+        },
+        "_org": { "type": "string", "minLength": 1 },
+        "objectId": { "type": "string", "minLength": 1 },
+        "objectType": {
+          "type": "string",
+          "const": "membercostshare"
+        }
+      }
+    },
+    "linkedPlanServices": {
+      "type": "array",
+      "minItems": 1,
+      "description": "List of covered services linked to this plan",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["_org", "objectId", "objectType", "linkedService", "planserviceCostShares"],
+        "properties": {
+          "_org": { "type": "string", "minLength": 1 },
+          "objectId": { "type": "string", "minLength": 1 },
+          "objectType": {
+            "type": "string",
+            "const": "planservice"
+          },
+          "linkedService": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["_org", "objectId", "objectType", "name"],
+            "properties": {
+              "_org": { "type": "string", "minLength": 1 },
+              "objectId": { "type": "string", "minLength": 1 },
+              "objectType": {
+                "type": "string",
+                "const": "service"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable service name"
+              }
+            }
+          },
+          "planserviceCostShares": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["deductible", "copay", "_org", "objectId", "objectType"],
+            "properties": {
+              "deductible": { "type": "number", "minimum": 0 },
+              "copay": { "type": "number", "minimum": 0 },
+              "_org": { "type": "string", "minLength": 1 },
+              "objectId": { "type": "string", "minLength": 1 },
+              "objectType": {
+                "type": "string",
+                "const": "membercostshare"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

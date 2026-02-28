@@ -14,6 +14,7 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 - ETag updated on every write (POST, PUT, PATCH)
 - **Conditional writes: `If-Match` on PUT/PATCH/DELETE → 412 Precondition Failed on mismatch**
 - **Conditional reads: `If-None-Match` on GET → 304 Not Modified when unchanged**
+- **Standalone JSON Schema file — retrievable at `GET /api/v1/schema/plan`**
 - Dual storage: In-memory (default) or Redis (persistent)
 - Comprehensive error handling with detailed validation messages
 - Maven-based build system
@@ -26,7 +27,7 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 - Spring Web MVC
 - Spring Data Redis
 - Jackson for JSON processing (including JsonNode merge patch)
-- NetworkNT JSON Schema Validator (v1.0.87)
+- NetworkNT JSON Schema Validator (v1.0.87) — JSON Schema draft 2020-12
 - Redis (optional, for persistent storage)
 - Maven 3.x
 
@@ -70,6 +71,44 @@ The application starts on port **8080**.
 
 ---
 
+## JSON Schema
+
+### Schema File Location
+
+The Plan JSON Schema is maintained as a standalone resource file:
+
+```
+src/main/resources/schemas/plan-schema.json
+```
+
+This file is the **single source of truth** for plan validation. It is loaded from the classpath at application startup and used to validate every write operation:
+
+| Operation | Schema Validation |
+|-----------|------------------|
+| `POST /api/v1/plan` | ✅ Full schema validation on request body |
+| `PUT /api/v1/plan/{id}` | ✅ Full schema validation on replacement body |
+| `PATCH /api/v1/plan/{id}` | ✅ Schema validation on the **fully merged** document |
+| `GET /api/v1/plan/{id}` | ❌ Read-only, no validation |
+| `DELETE /api/v1/plan/{id}` | ❌ No body, no validation |
+
+The schema enforces:
+- Required top-level fields: `_org`, `objectId`, `objectType`, `planType`, `creationDate`, `planCostShares`, `linkedPlanServices`
+- `objectType` must be `"plan"` (const)
+- `planType` must be `"inNetwork"` or `"outOfNetwork"` (enum)
+- `creationDate` format: `DD-MM-YYYY` (regex pattern)
+- `planCostShares` — nested required fields with non-negative numeric constraints
+- `linkedPlanServices` — array with at least one item, each with nested `linkedService` and `planserviceCostShares`
+
+### Retrieve the Schema
+
+```bash
+curl http://localhost:8080/api/v1/schema/plan
+```
+
+Returns the full JSON Schema with `Content-Type: application/json`. Useful for demo visibility, client-side validation, and documentation.
+
+---
+
 ## API Endpoints
 
 ### POST /api/v1/plan — Create a Plan
@@ -84,7 +123,51 @@ curl -X POST http://localhost:8080/api/v1/plan \
   -d @samples/plan.json
 ```
 
+**Validation failure example — missing required field (`objectType`):**
+```bash
+curl -X POST http://localhost:8080/api/v1/plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "_org": "example.com",
+    "objectId": "bad-plan-001",
+    "planType": "inNetwork",
+    "creationDate": "01-01-2025",
+    "planCostShares": {
+      "deductible": 500,
+      "_org": "example.com",
+      "copay": 10,
+      "objectId": "cs-001",
+      "objectType": "membercostshare"
+    },
+    "linkedPlanServices": []
+  }'
+```
+
+**Expected 400 response:**
+```json
+{
+  "error": "VALIDATION_ERROR",
+  "message": "JSON Schema validation failed",
+  "details": [
+    "$.objectType: is missing but it is required",
+    "$.linkedPlanServices: must have at least 1 items but found 0"
+  ]
+}
+```
+
 **Errors:** `400` schema invalid · `409` objectId already exists
+
+---
+
+### GET /api/v1/schema/plan — Retrieve the Plan JSON Schema
+
+Returns the full JSON Schema used to validate all plan write operations.
+
+```bash
+curl http://localhost:8080/api/v1/schema/plan
+```
+
+**Success:** `200 OK` with full JSON Schema body (`Content-Type: application/json`)
 
 ---
 
@@ -115,8 +198,7 @@ curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
 Replaces the **entire document**. The resource must already exist (no upsert).
 Full schema validation runs on the replacement body. A new ETag is generated.
 
-Supports optional `If-Match` for optimistic locking — prevents lost updates when multiple clients
-are writing concurrently.
+Supports optional `If-Match` for optimistic locking.
 
 **Headers:** `Content-Type: application/json`
 
@@ -158,11 +240,10 @@ curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   }'
 
 # PUT with If-Match — only replaces if ETag matches (safe concurrent update)
-# Returns 200 on success, 412 if ETag is stale
 curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Content-Type: application/json" \
   -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"' \
-  -d '{ ... same body as above ... }'
+  -d '{ ... same body ... }'
 
 # PUT with stale If-Match — returns 412 Precondition Failed
 curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
@@ -186,7 +267,7 @@ Applies a **JSON Merge Patch** (RFC 7396) to the existing document.
 
 **⚠️ Required Content-Type: `application/merge-patch+json`**
 
-Supports optional `If-Match` for optimistic locking.
+Supports optional `If-Match` for optimistic locking. The merged document is fully re-validated against the schema before being saved.
 
 **Merge Patch Rules (RFC 7396):**
 - Field in patch body = value → field is set/overwritten
@@ -194,16 +275,13 @@ Supports optional `If-Match` for optimistic locking.
 - Fields not in patch body → left unchanged
 - Nested objects are merged recursively
 
-After patching, the merged document is re-validated against the full JSON Schema.
-
 ```bash
-# PATCH without If-Match — always applies patch
+# PATCH without If-Match
 curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Content-Type: application/merge-patch+json" \
   -d '{ "planType": "outOfNetwork", "planCostShares": { "copay": 50 } }'
 
-# PATCH with If-Match — only applies if ETag matches (safe concurrent update)
-# Returns 200 with merged doc on success, 412 if ETag is stale
+# PATCH with If-Match
 curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Content-Type: application/merge-patch+json" \
   -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"' \
@@ -227,11 +305,10 @@ curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
 Supports optional `If-Match` for conditional delete.
 
 ```bash
-# DELETE without If-Match — always deletes if found
+# DELETE without If-Match
 curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
 
-# DELETE with If-Match — only deletes if ETag matches
-# Returns 204 on success, 412 if ETag is stale
+# DELETE with If-Match
 curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"'
 
@@ -283,7 +360,7 @@ All errors follow this structure:
 ```
 
 | Code | HTTP Status | Meaning |
-|------|-------------|---------| 
+|------|-------------|---------|
 | `VALIDATION_ERROR` | 400 | JSON Schema validation failed |
 | `INVALID_JSON` | 400 | Malformed JSON body |
 | `NOT_FOUND` | 404 | Resource does not exist |
@@ -301,7 +378,7 @@ All errors follow this structure:
 SchemaGuard/
 ├── src/
 │   ├── main/java/com/schemaguard/
-│   │   ├── controller/      # PlanController (POST/GET/PUT/PATCH/DELETE)
+│   │   ├── controller/      # PlanController, SchemaController
 │   │   ├── exception/       # NotFoundException, ConflictException,
 │   │   │                    # PreconditionFailedException, GlobalExceptionHandler
 │   │   ├── model/           # StoredDocument, ErrorResponse
@@ -309,10 +386,11 @@ SchemaGuard/
 │   │   ├── util/            # EtagUtil (SHA-256), JsonUtil
 │   │   └── validation/      # SchemaValidator, SchemaValidationException
 │   └── main/resources/
-│       └── schema/schema.json
+│       ├── schemas/
+│       │   └── plan-schema.json   ← standalone JSON Schema (single source of truth)
+│       └── application.properties
 ├── src/test/java/com/schemaguard/
-│   ├── controller/
-│   │   └── PlanCrudIntegrationTest.java
+│   ├── controller/PlanCrudIntegrationTest.java
 │   └── validation/SchemaValidatorTest.java
 └── samples/
     ├── plan.json
@@ -320,6 +398,8 @@ SchemaGuard/
 ```
 
 ### Key Design Decisions
+
+**Single schema file** — `schemas/plan-schema.json` is the only place the plan structure is defined. It is loaded once at startup via `SchemaValidator` and shared across all validation calls. The same instance is also served verbatim by `GET /api/v1/schema/plan`, guaranteeing the schema visible to clients is always in sync with what the server enforces.
 
 **Conditional writes** use `If-Match` checked against the stored SHA-256 ETag before any mutation occurs. The header is optional — omitting it allows unconditional writes (backwards compatible).
 
