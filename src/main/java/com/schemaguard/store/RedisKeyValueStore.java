@@ -24,20 +24,13 @@ public class RedisKeyValueStore implements KeyValueStore {
     @Override
     public boolean create(String objectId, String jsonString) {
         String key = KEY_PREFIX + objectId;
-        
-        // Check if key already exists
         Boolean exists = redisTemplate.hasKey(key);
         if (Boolean.TRUE.equals(exists)) {
             return false;
         }
-
-        // Create new document with etag
         String etag = EtagUtil.sha256Etag(jsonString);
         StoredDocument doc = new StoredDocument(objectId, jsonString, etag, Instant.now());
-
-        // Store in Redis with 24 hour TTL (optional - can be removed for persistence)
         redisTemplate.opsForValue().set(key, doc, 24, TimeUnit.HOURS);
-        
         return true;
     }
 
@@ -46,6 +39,19 @@ public class RedisKeyValueStore implements KeyValueStore {
         String key = KEY_PREFIX + objectId;
         StoredDocument doc = redisTemplate.opsForValue().get(key);
         return Optional.ofNullable(doc);
+    }
+
+    @Override
+    public boolean update(String objectId, String jsonString) {
+        String key = KEY_PREFIX + objectId;
+        Boolean exists = redisTemplate.hasKey(key);
+        if (!Boolean.TRUE.equals(exists)) {
+            return false;
+        }
+        String etag = EtagUtil.sha256Etag(jsonString);
+        StoredDocument updated = new StoredDocument(objectId, jsonString, etag, Instant.now());
+        redisTemplate.opsForValue().set(key, updated, 24, TimeUnit.HOURS);
+        return true;
     }
 
     @Override
