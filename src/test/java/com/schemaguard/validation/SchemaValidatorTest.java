@@ -1,14 +1,17 @@
 package com.schemaguard.validation;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class SchemaValidatorTest {
 
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     @Test
     void validPayload_passes() {
-        SchemaValidator validator = new SchemaValidator();
+        SchemaValidator validator = new SchemaValidator(objectMapper);
 
         String validJson = """
         {
@@ -50,7 +53,7 @@ class SchemaValidatorTest {
 
     @Test
     void missingRequiredField_fails() {
-        SchemaValidator validator = new SchemaValidator();
+        SchemaValidator validator = new SchemaValidator(objectMapper);
 
         // removed top-level objectType
         String invalidJson = """
