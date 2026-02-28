@@ -41,6 +41,13 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Required for @AutoConfigureMockMvc in Spring Boot 4.x -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Redis support -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
