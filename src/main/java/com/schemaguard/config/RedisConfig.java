@@ -7,7 +7,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 @Configuration
@@ -26,9 +26,10 @@ public class RedisConfig {
         template.setKeySerializer(new StringRedisSerializer());
         template.setHashKeySerializer(new StringRedisSerializer());
 
-        // Use the shared ObjectMapper (has JavaTimeModule registered) for JSON serialization
-        Jackson2JsonRedisSerializer<StoredDocument> serializer =
-            new Jackson2JsonRedisSerializer<>(objectMapper, StoredDocument.class);
+        // Use GenericJackson2JsonRedisSerializer with the shared ObjectMapper
+        // (which has JavaTimeModule registered to handle java.time.Instant)
+        GenericJackson2JsonRedisSerializer serializer =
+            new GenericJackson2JsonRedisSerializer(objectMapper);
         template.setValueSerializer(serializer);
         template.setHashValueSerializer(serializer);
 
