@@ -4,7 +4,7 @@ A Spring Boot REST API service for managing healthcare insurance plans with JSON
 
 ## Overview
 
-SchemaGuard is a RESTful web service that provides full CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation to ensure data integrity, supports conditional GET requests using ETags for optimized caching, and implements JSON Merge Patch (RFC 7396) for partial updates.
+SchemaGuard is a RESTful web service that provides full CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation to ensure data integrity, supports conditional GET/PUT/PATCH/DELETE using ETags to prevent lost updates, and implements JSON Merge Patch (RFC 7396) for partial updates.
 
 ## Features
 
@@ -12,6 +12,8 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 - Full CRUD: POST, GET, PUT (replace), PATCH (JSON Merge Patch), DELETE
 - ETag support for conditional GET requests (SHA-256 based)
 - ETag updated on every write (POST, PUT, PATCH)
+- **Conditional writes: `If-Match` on PUT/PATCH/DELETE → 412 Precondition Failed on mismatch**
+- **Conditional reads: `If-None-Match` on GET → 304 Not Modified when unchanged**
 - Dual storage: In-memory (default) or Redis (persistent)
 - Comprehensive error handling with detailed validation messages
 - Maven-based build system
@@ -91,30 +93,35 @@ curl -X POST http://localhost:8080/api/v1/plan \
 Supports conditional GET via `If-None-Match`.
 
 ```bash
-# Full fetch
-curl -X GET http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
+# Full fetch — returns 200 with body and ETag
+curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
 
-# Conditional (returns 304 if unchanged)
-curl -X GET http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H 'If-None-Match: "abc123..."'
+# Conditional GET — returns 304 (no body) if ETag matches (resource unchanged)
+curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H 'If-None-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"'
+
+# If the ETag doesn't match (resource has changed) → 200 with updated body
+curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H 'If-None-Match: "stale-etag-value"'
 ```
 
-**Success:** `200 OK` + `ETag` header (or `304 Not Modified`)  
+**Success:** `200 OK` + `ETag` header (or `304 Not Modified` if ETag matches)
 **Errors:** `404` not found
 
 ---
 
 ### PUT /api/v1/plan/{objectId} — Replace a Plan
 
-Replaces the **entire document**. The resource must already exist (no upsert).  
-Full schema validation runs on the replacement body.  
-A new ETag is generated.
+Replaces the **entire document**. The resource must already exist (no upsert).
+Full schema validation runs on the replacement body. A new ETag is generated.
+
+Supports optional `If-Match` for optimistic locking — prevents lost updates when multiple clients
+are writing concurrently.
 
 **Headers:** `Content-Type: application/json`
 
-**Request body:** Complete, schema-valid plan JSON (same structure as POST)
-
 ```bash
+# PUT without If-Match — always replaces (no concurrency protection)
 curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Content-Type: application/json" \
   -d '{
@@ -149,17 +156,27 @@ curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
     "planType": "outOfNetwork",
     "creationDate": "01-01-2025"
   }'
+
+# PUT with If-Match — only replaces if ETag matches (safe concurrent update)
+# Returns 200 on success, 412 if ETag is stale
+curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Content-Type: application/json" \
+  -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"' \
+  -d '{ ... same body as above ... }'
+
+# PUT with stale If-Match — returns 412 Precondition Failed
+curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Content-Type: application/json" \
+  -H 'If-Match: "stale-etag-value"' \
+  -d '{ ... body ... }'
 ```
 
-**Success response (`200 OK`):**
+**Success (`200 OK`):**
 ```json
-{
-  "objectId": "12xvxc345ssdsds-508",
-  "etag": "<new-sha256-etag>"
-}
+{ "objectId": "12xvxc345ssdsds-508", "etag": "<new-sha256-etag>" }
 ```
 
-**Errors:** `400` schema invalid · `404` not found
+**Errors:** `400` schema invalid · `404` not found · `412` ETag mismatch
 
 ---
 
@@ -169,57 +186,62 @@ Applies a **JSON Merge Patch** (RFC 7396) to the existing document.
 
 **⚠️ Required Content-Type: `application/merge-patch+json`**
 
+Supports optional `If-Match` for optimistic locking.
+
 **Merge Patch Rules (RFC 7396):**
 - Field in patch body = value → field is set/overwritten
 - Field in patch body = `null` → field is **removed** from document
 - Fields not in patch body → left unchanged
 - Nested objects are merged recursively
 
-After patching, the merged document is re-validated against the full JSON Schema.  
-A required field set to `null` will be removed, causing a `400` schema validation error.
+After patching, the merged document is re-validated against the full JSON Schema.
 
 ```bash
+# PATCH without If-Match — always applies patch
 curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Content-Type: application/merge-patch+json" \
-  -d '{
-    "planType": "outOfNetwork",
-    "planCostShares": {
-      "copay": 50
-    }
-  }'
+  -d '{ "planType": "outOfNetwork", "planCostShares": { "copay": 50 } }'
+
+# PATCH with If-Match — only applies if ETag matches (safe concurrent update)
+# Returns 200 with merged doc on success, 412 if ETag is stale
+curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Content-Type: application/merge-patch+json" \
+  -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"' \
+  -d '{ "planType": "outOfNetwork" }'
+
+# PATCH with stale If-Match — returns 412 Precondition Failed
+curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Content-Type: application/merge-patch+json" \
+  -H 'If-Match: "stale-etag-value"' \
+  -d '{ "planType": "outOfNetwork" }'
 ```
 
-**Example patch body — update planType and one nested field:**
-```json
-{
-  "planType": "outOfNetwork",
-  "planCostShares": {
-    "copay": 50
-  }
-}
-```
+**Success (`200 OK`):** Full merged document JSON + updated `ETag` header
 
-**Example patch body — remove an optional field:**
-```json
-{
-  "someOptionalField": null
-}
-```
-
-**Success response (`200 OK`):** Full merged document JSON + `ETag` header
-
-**Errors:** `400` invalid patch JSON or schema validation failure after patch · `404` not found
+**Errors:** `400` invalid patch or schema failure · `404` not found · `412` ETag mismatch
 
 ---
 
 ### DELETE /api/v1/plan/{objectId} — Delete a Plan
 
+Supports optional `If-Match` for conditional delete.
+
 ```bash
+# DELETE without If-Match — always deletes if found
 curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
+
+# DELETE with If-Match — only deletes if ETag matches
+# Returns 204 on success, 412 if ETag is stale
+curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"'
+
+# DELETE with stale If-Match — returns 412 Precondition Failed
+curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H 'If-Match: "stale-etag-value"'
 ```
 
-**Success:** `204 No Content`  
-**Errors:** `404` not found
+**Success:** `204 No Content`
+**Errors:** `404` not found · `412` ETag mismatch
 
 ---
 
@@ -233,7 +255,18 @@ curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
 | PATCH     | ✅ New ETag generated (SHA-256 of merged body) |
 | DELETE    | N/A |
 
-ETags are SHA-256 hashes of the stored JSON content. Spring automatically wraps them in quotes in the `ETag` response header.
+ETags are SHA-256 hashes of the stored JSON content. Spring automatically wraps them in quotes in the `ETag` response header (e.g. `ETag: "abc123"`). When sending `If-Match` or `If-None-Match`, you can include or omit the surrounding quotes — the server strips them before comparing.
+
+---
+
+## Conditional Request Summary
+
+| Header | Method | Effect |
+|--------|--------|--------|
+| `If-None-Match` | GET | `304 Not Modified` if ETag matches (no body sent) |
+| `If-Match` | PUT | `412 Precondition Failed` if ETag doesn't match |
+| `If-Match` | PATCH | `412 Precondition Failed` if ETag doesn't match |
+| `If-Match` | DELETE | `412 Precondition Failed` if ETag doesn't match |
 
 ---
 
@@ -250,20 +283,13 @@ All errors follow this structure:
 ```
 
 | Code | HTTP Status | Meaning |
-|------|-------------|---------|
+|------|-------------|---------| 
 | `VALIDATION_ERROR` | 400 | JSON Schema validation failed |
 | `INVALID_JSON` | 400 | Malformed JSON body |
 | `NOT_FOUND` | 404 | Resource does not exist |
 | `CONFLICT` | 409 | Duplicate objectId on POST |
+| `PRECONDITION_FAILED` | 412 | If-Match header didn't match stored ETag |
 | `INTERNAL_SERVER_ERROR` | 500 | Unexpected error |
-
----
-
-## Postman Collection
-
-A complete Postman collection is available at `docs/postman/schema-guard-crud.json`.
-
-Import it into Postman to get pre-built requests for all five operations (POST, GET, PUT, PATCH, DELETE) with automated test scripts.
 
 ---
 
@@ -276,7 +302,8 @@ SchemaGuard/
 ├── src/
 │   ├── main/java/com/schemaguard/
 │   │   ├── controller/      # PlanController (POST/GET/PUT/PATCH/DELETE)
-│   │   ├── exception/       # NotFoundException, ConflictException, GlobalExceptionHandler
+│   │   ├── exception/       # NotFoundException, ConflictException,
+│   │   │                    # PreconditionFailedException, GlobalExceptionHandler
 │   │   ├── model/           # StoredDocument, ErrorResponse
 │   │   ├── store/           # KeyValueStore, InMemoryKeyValueStore, RedisKeyValueStore
 │   │   ├── util/            # EtagUtil (SHA-256), JsonUtil
@@ -285,11 +312,8 @@ SchemaGuard/
 │       └── schema/schema.json
 ├── src/test/java/com/schemaguard/
 │   ├── controller/
-│   │   ├── MergePatchUnitTest.java        # Unit tests for RFC 7396 merge logic
-│   │   └── PlanCrudIntegrationTest.java   # Integration tests for PUT/PATCH
+│   │   └── PlanCrudIntegrationTest.java
 │   └── validation/SchemaValidatorTest.java
-├── docs/
-│   └── postman/schema-guard-crud.json    # Postman collection
 └── samples/
     ├── plan.json
     └── invalid.json
@@ -297,11 +321,13 @@ SchemaGuard/
 
 ### Key Design Decisions
 
-**Merge Patch** is implemented directly in `PlanController.applyMergePatch()` using Jackson `JsonNode` tree manipulation. No external library needed — the logic is a clean recursive function matching RFC 7396 exactly.
+**Conditional writes** use `If-Match` checked against the stored SHA-256 ETag before any mutation occurs. The header is optional — omitting it allows unconditional writes (backwards compatible).
 
-**Validation runs post-patch** — the merged `JsonNode` is serialized back to JSON string and passed through the same `SchemaValidator.validatePlanJson()` used by POST and PUT. This ensures partial patches cannot bypass required-field constraints.
+**ETag quote handling** — stored ETags are raw unquoted SHA-256 strings. Spring's `.eTag()` builder adds quotes to the response header automatically. Incoming `If-Match`/`If-None-Match` values are stripped of surrounding quotes before comparison, so both `"abc123"` and `abc123` work correctly from the client side.
 
-**ETag updates** are handled inside `KeyValueStore.update()`. Both `InMemoryKeyValueStore` and `RedisKeyValueStore` call `EtagUtil.sha256Etag(newJson)` and store a fresh `StoredDocument`, so the ETag is always content-derived and consistent across both backends.
+**Merge Patch** is implemented directly in `PlanController.applyMergePatch()` using Jackson `JsonNode` tree manipulation. No external library needed.
+
+**Validation runs post-patch** — the merged `JsonNode` is serialized back to JSON and passed through `SchemaValidator.validatePlanJson()`, identical to POST and PUT.
 
 ---
 
