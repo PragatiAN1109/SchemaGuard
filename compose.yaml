@@ -1,0 +1,38 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: schemaguard-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      # Named volume — Redis data persists across container restarts
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: schemaguard-app
+    ports:
+      - "8080:8080"
+    environment:
+      # Tells the app to connect to the 'redis' service by container name
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Activates the redis Spring profile (RedisKeyValueStore + RedisConfig)
+      - SPRING_PROFILES_ACTIVE=redis
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  redis-data:
+    driver: local
