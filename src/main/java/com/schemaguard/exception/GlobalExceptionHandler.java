@@ -57,6 +57,17 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
+    // 412 - precondition failed (If-Match mismatch)
+    @ExceptionHandler(PreconditionFailedException.class)
+    public ResponseEntity<ErrorResponse> handlePreconditionFailed(PreconditionFailedException e) {
+        ErrorResponse body = new ErrorResponse(
+                "PRECONDITION_FAILED",
+                e.getMessage(),
+                List.of()
+        );
+        return ResponseEntity.status(HttpStatus.PRECONDITION_FAILED).body(body);
+    }
+
     // Fallback - 500
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneric(Exception e) {
