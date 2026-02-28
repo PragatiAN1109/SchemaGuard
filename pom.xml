@@ -11,7 +11,7 @@
     <groupId>com</groupId>
     <artifactId>SchemaGuard</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>SchemaGuard</name>
+    <n>SchemaGuard</n>
     <description>SchemaGuard</description>
     <url/>
     <licenses>
@@ -37,13 +37,14 @@
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
 
+        <!-- Required for @AutoConfigureMockMvc in Spring Boot 4.x -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
+            <artifactId>spring-boot-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -51,6 +52,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- Java 8 date/time support for Jackson (required for Instant serialization) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
 
         <!-- JSON Schema validation -->

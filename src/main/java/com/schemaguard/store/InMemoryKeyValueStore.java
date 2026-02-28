@@ -21,14 +21,23 @@ public class InMemoryKeyValueStore implements KeyValueStore {
     public boolean create(String objectId, String jsonString) {
         String etag = EtagUtil.sha256Etag(jsonString);
         StoredDocument doc = new StoredDocument(objectId, jsonString, etag, Instant.now());
-
-        // putIfAbsent is atomic: prevents race-condition duplicates
         return map.putIfAbsent(objectId, doc) == null;
     }
 
     @Override
     public Optional<StoredDocument> get(String objectId) {
         return Optional.ofNullable(map.get(objectId));
+    }
+
+    @Override
+    public boolean update(String objectId, String jsonString) {
+        if (!map.containsKey(objectId)) {
+            return false;
+        }
+        String etag = EtagUtil.sha256Etag(jsonString);
+        StoredDocument updated = new StoredDocument(objectId, jsonString, etag, Instant.now());
+        map.put(objectId, updated);
+        return true;
     }
 
     @Override
