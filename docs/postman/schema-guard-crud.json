@@ -1,0 +1,194 @@
+{
+  "info": {
+    "name": "SchemaGuard CRUD",
+    "_postman_id": "schemaguard-crud-v1",
+    "description": "Full CRUD collection for SchemaGuard insurance plan API.\nCovers POST, GET, PUT (replace), PATCH (JSON Merge Patch), and DELETE.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "objectId",
+      "value": "12xvxc345ssdsds-508",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "POST - Create Plan",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/plan",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "plan"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"planCostShares\": {\n    \"deductible\": 2000,\n    \"_org\": \"example.com\",\n    \"copay\": 23,\n    \"objectId\": \"1234vxc2324sdf-501\",\n    \"objectType\": \"membercostshare\"\n  },\n  \"linkedPlanServices\": [\n    {\n      \"linkedService\": {\n        \"_org\": \"example.com\",\n        \"objectId\": \"1234520xvc30asdf-502\",\n        \"objectType\": \"service\",\n        \"name\": \"Yearly physical\"\n      },\n      \"planserviceCostShares\": {\n        \"deductible\": 10,\n        \"_org\": \"example.com\",\n        \"copay\": 0,\n        \"objectId\": \"1234512xvc1314asdfs-503\",\n        \"objectType\": \"membercostshare\"\n      },\n      \"_org\": \"example.com\",\n      \"objectId\": \"27283xvx9asdff-504\",\n      \"objectType\": \"planservice\"\n    }\n  ],\n  \"_org\": \"example.com\",\n  \"objectId\": \"12xvxc345ssdsds-508\",\n  \"objectType\": \"plan\",\n  \"planType\": \"inNetwork\",\n  \"creationDate\": \"12-12-2017\"\n}"
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
+              "const json = pm.response.json();",
+              "pm.collectionVariables.set('etag', json.etag);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET - Retrieve Plan",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "plan", "{{objectId}}"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
+              "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET - Conditional GET (304 if unchanged)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "If-None-Match", "value": "{{etag}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "plan", "{{objectId}}"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 304 Not Modified', () => pm.response.to.have.status(304));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "PUT - Replace Plan",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "plan", "{{objectId}}"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"planCostShares\": {\n    \"deductible\": 3000,\n    \"_org\": \"example.com\",\n    \"copay\": 50,\n    \"objectId\": \"1234vxc2324sdf-501\",\n    \"objectType\": \"membercostshare\"\n  },\n  \"linkedPlanServices\": [\n    {\n      \"linkedService\": {\n        \"_org\": \"example.com\",\n        \"objectId\": \"1234520xvc30asdf-502\",\n        \"objectType\": \"service\",\n        \"name\": \"Annual checkup\"\n      },\n      \"planserviceCostShares\": {\n        \"deductible\": 20,\n        \"_org\": \"example.com\",\n        \"copay\": 10,\n        \"objectId\": \"1234512xvc1314asdfs-503\",\n        \"objectType\": \"membercostshare\"\n      },\n      \"_org\": \"example.com\",\n      \"objectId\": \"27283xvx9asdff-504\",\n      \"objectType\": \"planservice\"\n    }\n  ],\n  \"_org\": \"example.com\",\n  \"objectId\": \"12xvxc345ssdsds-508\",\n  \"objectType\": \"plan\",\n  \"planType\": \"outOfNetwork\",\n  \"creationDate\": \"01-01-2025\"\n}"
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
+              "const json = pm.response.json();",
+              "pm.collectionVariables.set('etag', json.etag);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "PATCH - Merge Patch Plan",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Content-Type", "value": "application/merge-patch+json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "plan", "{{objectId}}"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"planType\": \"outOfNetwork\",\n  \"planCostShares\": {\n    \"copay\": 50\n  }\n}"
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
+              "pm.test('planType updated', () => {",
+              "  const json = pm.response.json();",
+              "  pm.expect(json.planType).to.eql('outOfNetwork');",
+              "});",
+              "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "DELETE - Delete Plan",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "v1", "plan", "{{objectId}}"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 204 No Content', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
