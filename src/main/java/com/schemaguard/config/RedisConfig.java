@@ -1,5 +1,6 @@
 package com.schemaguard.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.schemaguard.model.StoredDocument;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -14,7 +15,10 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 public class RedisConfig {
 
     @Bean
-    public RedisTemplate<String, StoredDocument> redisTemplate(RedisConnectionFactory connectionFactory) {
+    public RedisTemplate<String, StoredDocument> redisTemplate(
+            RedisConnectionFactory connectionFactory,
+            ObjectMapper objectMapper) {
+
         RedisTemplate<String, StoredDocument> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
 
@@ -22,9 +26,9 @@ public class RedisConfig {
         template.setKeySerializer(new StringRedisSerializer());
         template.setHashKeySerializer(new StringRedisSerializer());
 
-        // Use JSON serializer for values
-        Jackson2JsonRedisSerializer<StoredDocument> serializer = 
-            new Jackson2JsonRedisSerializer<>(StoredDocument.class);
+        // Use the shared ObjectMapper (has JavaTimeModule registered) for JSON serialization
+        Jackson2JsonRedisSerializer<StoredDocument> serializer =
+            new Jackson2JsonRedisSerializer<>(objectMapper, StoredDocument.class);
         template.setValueSerializer(serializer);
         template.setHashValueSerializer(serializer);
 
