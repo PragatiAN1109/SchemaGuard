@@ -1,13 +1,15 @@
 package com.schemaguard.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.schemaguard.model.StoredDocument;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.RedisSerializer;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 @Configuration
@@ -15,23 +17,27 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 public class RedisConfig {
 
     @Bean
-    public RedisTemplate<String, StoredDocument> redisTemplate(
-            RedisConnectionFactory connectionFactory,
-            ObjectMapper objectMapper) {
+    public RedisTemplate<String, StoredDocument> redisTemplate(RedisConnectionFactory connectionFactory) {
+
+        // Build a dedicated ObjectMapper for Redis serialization.
+        // Must have JavaTimeModule for Instant and must NOT use default typing
+        // (RedisSerializer.json() handles type-safe deserialization via a typed serializer).
+        ObjectMapper redisMapper = new ObjectMapper();
+        redisMapper.registerModule(new JavaTimeModule());
+        redisMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
         RedisTemplate<String, StoredDocument> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
 
-        // Use String serializer for keys
+        // String keys
         template.setKeySerializer(new StringRedisSerializer());
         template.setHashKeySerializer(new StringRedisSerializer());
 
-        // Use GenericJackson2JsonRedisSerializer with the shared ObjectMapper
-        // (which has JavaTimeModule registered to handle java.time.Instant)
-        GenericJackson2JsonRedisSerializer serializer =
-            new GenericJackson2JsonRedisSerializer(objectMapper);
-        template.setValueSerializer(serializer);
-        template.setHashValueSerializer(serializer);
+        // Type-safe JSON serializer: knows to deserialize into StoredDocument
+        RedisSerializer<StoredDocument> valueSerializer =
+            RedisSerializer.json(redisMapper, StoredDocument.class);
+        template.setValueSerializer(valueSerializer);
+        template.setHashValueSerializer(valueSerializer);
 
         template.afterPropertiesSet();
         return template;
