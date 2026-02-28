@@ -26,8 +26,11 @@ services:
       # Tells the app to connect to the 'redis' service by container name
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      # Activates the redis Spring profile (RedisKeyValueStore + RedisConfig)
+      # Activates the redis Spring profile (RedisKeyValueStore + RedisConfig + security)
       - SPRING_PROFILES_ACTIVE=redis
+      # Google OAuth2 Client ID for JWT audience validation.
+      # Set this before running: export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
     depends_on:
       redis:
         condition: service_healthy
