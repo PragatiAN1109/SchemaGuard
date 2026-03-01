@@ -1,6 +1,6 @@
 # SchemaGuard
 
-A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch integration, and Google OAuth2 JWT security.
+A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch parent-child indexing, and Google OAuth2 JWT security.
 
 ## overview
 
@@ -15,7 +15,7 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 - **public endpoint: `GET /api/v1/schema/plan` — no auth required**
 - **standardized error contract — every error returns the same JSON shape**
 - Redis as primary KV store — data persists across app restarts
-- Elasticsearch — infrastructure wired, indexing coming in next task
+- Elasticsearch parent-child index — `plans-index` created on startup with join mapping
 - Docker Compose for one-command demo startup
 
 ## Spring profile → storage + security mapping
@@ -31,7 +31,7 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 
 ### prerequisites
 - Docker + Docker Compose installed
-- Google Client ID (see Google IDP Security section below)
+- Google Client ID (see Google IDP security section below)
 
 ### start all services
 
@@ -47,66 +47,162 @@ This starts three services:
 
 The app waits for both Redis and Elasticsearch to pass their health checks before starting.
 
-Look for this in the app logs to confirm everything is up:
+Look for these lines in the app logs to confirm everything is up:
 ```
-Elasticsearch cluster reachable at elasticsearch:9200 — status: green
+configuring Elasticsearch client → elasticsearch:9200
+Elasticsearch index 'plans-index' initialized with parent-child mapping
+Elasticsearch cluster reachable at http://elasticsearch:9200
 Started SchemaGuardApplication
 ```
 
 ---
 
-## verifying Elasticsearch
+## Elasticsearch parent-child mapping
 
-### 1. ping the cluster root endpoint
+### what is a join field?
 
-```bash
-curl http://localhost:9200
-```
+Elasticsearch does not support relational joins across documents by default.
+The `join` field type is the official way to model parent-child relationships
+within a single index. Parent and child documents must live on the **same shard**,
+enforced by routing every child document with `?routing=<parentId>`.
 
-Expected response:
+### index mapping
+
+The `plans-index` is created automatically on startup with this mapping:
+
 ```json
 {
-  "name" : "schemaguard-elasticsearch",
-  "cluster_name" : "docker-cluster",
-  "cluster_uuid" : "<uuid>",
-  "version" : {
-    "number" : "8.13.4",
-    "build_flavor" : "default",
-    "build_type" : "docker",
-    "lucene_version" : "9.10.0",
-    "minimum_wire_compatibility_version" : "7.17.0",
-    "minimum_index_compatibility_version" : "7.0.0"
-  },
-  "tagline" : "You Know, for Search"
+  "mappings": {
+    "dynamic": true,
+    "properties": {
+      "objectId": {
+        "type": "keyword"
+      },
+      "objectType": {
+        "type": "keyword"
+      },
+      "my_join_field": {
+        "type": "join",
+        "relations": {
+          "plan": "child"
+        }
+      }
+    }
+  }
 }
 ```
 
-### 2. check cluster health
+| field | type | purpose |
+|-------|------|---------|
+| `objectId` | keyword | exact-match lookups by plan ID |
+| `objectType` | keyword | filter by document type |
+| `my_join_field` | join | defines `plan` → `child` relation |
+| all other fields | dynamic | stored as-is from the JSON payload |
+
+### routing rules
+
+| document type | routing value | join field value |
+|--------------|---------------|------------------|
+| parent (plan) | `objectId` (default) | `"plan"` |
+| child | `parentId` (explicit, required) | `{"name": "child", "parent": "<parentId>"}` |
+
+Routing by parent ID guarantees co-location on the same shard, which is required
+for `has_child`, `has_parent`, and `parent_id` queries.
+
+---
+
+## verifying the parent-child index
+
+### check index was created
 
 ```bash
-curl http://localhost:9200/_cluster/health?pretty
+curl http://localhost:9200/plans-index
 ```
 
-Expected response:
-```json
-{
-  "cluster_name" : "docker-cluster",
-  "status" : "green",
-  "number_of_nodes" : 1,
-  "number_of_data_nodes" : 1,
-  "active_shards" : 0
-}
-```
-
-### 3. confirm app connectivity in logs
+### insert a parent document
 
 ```bash
+curl -X PUT "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "objectId": "12xvxc345ssdsds-508",
+    "objectType": "plan",
+    "planType": "inNetwork",
+    "my_join_field": "plan"
+  }'
+```
+
+### insert a child document (routing = parentId)
+
+```bash
+curl -X PUT "http://localhost:9200/plans-index/_doc/1234520xvc30asdf-502?routing=12xvxc345ssdsds-508" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "objectId": "1234520xvc30asdf-502",
+    "objectType": "service",
+    "name": "Yearly physical",
+    "my_join_field": {
+      "name": "child",
+      "parent": "12xvxc345ssdsds-508"
+    }
+  }'
+```
+
+### query: find all parents that have at least one child
+
+```bash
+curl -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "has_child": {
+        "type": "child",
+        "query": { "match_all": {} }
+      }
+    }
+  }'
+```
+
+### query: find all children of a specific parent
+
+```bash
+curl -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "parent_id": {
+        "type": "child",
+        "id": "12xvxc345ssdsds-508"
+      }
+    }
+  }'
+```
+
+### query: find the parent of a specific child
+
+```bash
+curl -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "has_parent": {
+        "parent_type": "plan",
+        "query": { "match_all": {} }
+      }
+    }
+  }'
+```
+
+---
+
+## verifying Elasticsearch cluster
+
+```bash
+# cluster health
+curl "http://localhost:9200/_cluster/health?pretty"
+
+# confirm app connected
 docker logs schemaguard-app | grep -i elastic
-```
-
-Expected output:
-```
-Elasticsearch cluster reachable at elasticsearch:9200 — status: green
 ```
 
 ---
@@ -149,7 +245,7 @@ curl -X POST http://localhost:8080/api/v1/plan \
   "timestamp": "2026-02-28T15:30:00Z",
   "status": 400,
   "error": "Bad Request",
-  "message": "schema validation failed — $.planType: is missing but it is required; $.creationDate: is missing but it is required",
+  "message": "schema validation failed — $.planType: is missing but it is required",
   "path": "/api/v1/plan"
 }
 ```
@@ -217,58 +313,28 @@ On success, the server logs `sub` and `email` from the token and adds `X-User-Su
 
 1. navigate to **APIs & Services → OAuth consent screen**
 2. choose **External** → **Create**
-3. fill in:
-   - app name: `SchemaGuard`
-   - user support email: your email
-   - developer contact email: your email
-4. click **Save and Continue** through the remaining steps
-5. under **Test users**, add your own Google email address
-6. click **Back to Dashboard**
+3. fill in app name, support email, developer contact
+4. under **Test users**, add your own Google email
+5. click **Back to Dashboard**
 
 ### 1.3 create OAuth 2.0 client ID
 
 1. go to **APIs & Services → Credentials**
 2. click **Create Credentials → OAuth client ID**
 3. application type: **Web application**
-4. name: `SchemaGuard Web Client`
-5. under **Authorized JavaScript origins**, add:
-   ```
-   http://localhost:5500
-   http://localhost:8080
-   ```
-6. click **Create**
-7. **copy the Client ID** — it looks like: `123456789-abc123.apps.googleusercontent.com`
+4. under **Authorized JavaScript origins**, add `http://localhost:5500` and `http://localhost:8080`
+5. click **Create** and copy the Client ID
 
 ---
 
-## step 2 — obtain a Google ID token (demo)
-
-### option A — HTML token page (recommended)
-
-a ready-made token page is included at `docs/get-token.html`.
-
-1. open `docs/get-token.html` in a text editor
-2. replace `YOUR_GOOGLE_CLIENT_ID` with your actual client ID
-3. serve it locally:
+## step 2 — obtain a Google ID token
 
 ```bash
-# Python
+# Python static server
 cd docs && python3 -m http.server 5500
-
-# Node
-cd docs && npx serve -p 5500
 ```
 
-4. open `http://localhost:5500/get-token.html` in a browser
-5. click **Sign in with Google**
-6. copy the token from the text box
-
-### option B — OAuth Playground
-
-1. go to [https://developers.google.com/oauthplayground](https://developers.google.com/oauthplayground)
-2. click settings gear → check **Use your own OAuth credentials**
-3. select `openid`, `email` → authorize → exchange for tokens
-4. copy the `id_token` value
+Open `http://localhost:5500/get-token.html`, sign in, copy the token.
 
 ---
 
@@ -307,12 +373,7 @@ tests use the `test` profile: `InMemoryKeyValueStore`, no Redis, no Elasticsearc
 
 ## JSON Schema
 
-```
-src/main/resources/schemas/plan-schema.json
-```
-
 ```bash
-# retrieve at runtime (public endpoint — no auth needed)
 curl http://localhost:8080/api/v1/schema/plan
 ```
 
@@ -322,18 +383,21 @@ curl http://localhost:8080/api/v1/schema/plan
 
 ```
 SchemaGuard/
-├── compose.yaml                                     ← Redis + Elasticsearch + app
+├── compose.yaml                                         ← Redis + Elasticsearch + app
 ├── Dockerfile
 ├── docs/
 │   └── get-token.html
 ├── src/main/java/com/schemaguard/
 │   ├── config/
 │   │   ├── AppConfig.java
-│   │   ├── ElasticsearchConfig.java         ← RestClient + ElasticsearchClient beans
+│   │   ├── ElasticsearchConfig.java             ← ElasticsearchConfiguration base class
 │   │   ├── RedisConfig.java
 │   │   └── SecurityConfig.java
 │   ├── elastic/
-│   │   └── ElasticsearchHealthCheck.java    ← startup cluster ping via ApplicationReadyEvent
+│   │   ├── ElasticsearchHealthCheck.java        ← startup HTTP ping
+│   │   ├── PlanIndexConstants.java              ← index name, join field, type names
+│   │   ├── PlanIndexInitializer.java            ← creates plans-index with join mapping on startup
+│   │   └── PlanRoutingStrategy.java             ← join field shapes + child routing logic
 │   ├── security/
 │   │   ├── JwtClaimsLogger.java
 │   │   └── SecurityErrorHandler.java
@@ -349,7 +413,7 @@ SchemaGuard/
 ├── src/main/resources/
 │   ├── schemas/plan-schema.json
 │   ├── application.properties
-│   └── application-redis.properties       ← elastic.host / elastic.port added
+│   └── application-redis.properties
 └── src/test/resources/
     └── application-test.properties
 ```
