@@ -71,6 +71,12 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- Elasticsearch — Java API Client (Spring Boot 4 compatible, RestHighLevelClient removed) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-elasticsearch</artifactId>
+        </dependency>
+
         <!-- Java 8 date/time support for Jackson (required for Instant serialization) -->
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
