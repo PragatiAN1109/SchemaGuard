@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.serializer.RedisSerializer;
 import org.springframework.data.redis.serializer.SerializationException;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
@@ -19,6 +20,10 @@ import java.io.IOException;
 @Profile("redis")
 public class RedisConfig {
 
+    /**
+     * Typed template for storing plan documents (StoredDocument values).
+     * Used by RedisKeyValueStore.
+     */
     @Bean
     public RedisTemplate<String, StoredDocument> redisTemplate(RedisConnectionFactory connectionFactory) {
 
@@ -26,7 +31,6 @@ public class RedisConfig {
         redisMapper.registerModule(new JavaTimeModule());
         redisMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
-        // Custom type-safe serializer for StoredDocument
         RedisSerializer<StoredDocument> valueSerializer = new RedisSerializer<>() {
             @Override
             public byte[] serialize(StoredDocument value) throws SerializationException {
@@ -57,5 +61,14 @@ public class RedisConfig {
         template.setHashValueSerializer(valueSerializer);
         template.afterPropertiesSet();
         return template;
+    }
+
+    /**
+     * String-only template used by RedisStreamEventPublisher for XADD operations.
+     * Redis Streams store entries as flat string field-value maps.
+     */
+    @Bean
+    public StringRedisTemplate stringRedisTemplate(RedisConnectionFactory connectionFactory) {
+        return new StringRedisTemplate(connectionFactory);
     }
 }

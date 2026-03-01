@@ -2,6 +2,7 @@ package com.schemaguard.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.schemaguard.queue.IndexEventPublisher;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -13,8 +14,9 @@ import static org.junit.jupiter.api.Assertions.*;
 class MergePatchUnitTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
-    // Instantiate just enough of the controller to call applyMergePatch
-    private final PlanController controller = new PlanController(null, null, mapper);
+    // no-op publisher — event publishing is not under test here
+    private final IndexEventPublisher noOpPublisher = event -> {};
+    private final PlanController controller = new PlanController(null, null, mapper, noOpPublisher);
 
     @Test
     void patch_overwritesScalarField() throws Exception {
