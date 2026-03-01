@@ -13,6 +13,7 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 - ETag support for conditional requests (SHA-256 based)
 - **Google OAuth2 RS256 JWT security — all `/api/v1/plan/**` endpoints require a valid Bearer token**
 - **Public endpoint: `GET /api/v1/schema/plan` — no auth required**
+- **Standardized error contract — every error returns the same JSON shape**
 - Redis as primary store — data persists across app restarts
 - Docker Compose for one-command demo startup
 
@@ -22,6 +23,85 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 |---------|----------------|----------|
 | `redis` (default) | `RedisKeyValueStore` | Google JWT enforced |
 | `test` | `InMemoryKeyValueStore` | Security auto-config excluded |
+
+---
+
+## Error Contract
+
+Every error response — including authentication failures from Spring Security — follows this exact JSON shape:
+
+```json
+{
+  "timestamp": "2026-02-28T10:15:30Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "...",
+  "path": "/api/v1/plan"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | ISO-8601 string | When the error occurred |
+| `status` | integer | HTTP status code |
+| `error` | string | HTTP reason phrase |
+| `message` | string | Human-readable description |
+| `path` | string | Request URI that caused the error |
+
+No stack traces are ever included in the response body.
+
+### Example 1 — Validation Failure (400)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/plan \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"objectId": "abc", "objectType": "plan"}'
+```
+
+```json
+{
+  "timestamp": "2026-02-28T15:30:00Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Schema validation failed — $.planType: is missing but it is required; $.creationDate: is missing but it is required",
+  "path": "/api/v1/plan"
+}
+```
+
+### Example 2 — Unauthorized / No Token (401)
+
+```bash
+curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
+```
+
+```json
+{
+  "timestamp": "2026-02-28T15:30:05Z",
+  "status": 401,
+  "error": "Unauthorized",
+  "message": "Authentication required: missing or invalid Bearer token",
+  "path": "/api/v1/plan/12xvxc345ssdsds-508"
+}
+```
+
+### Example 3 — Precondition Failed (412)
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'If-Match: "wrong-etag-value"'
+```
+
+```json
+{
+  "timestamp": "2026-02-28T15:30:10Z",
+  "status": 412,
+  "error": "Precondition Failed",
+  "message": "ETag mismatch: resource has been modified",
+  "path": "/api/v1/plan/12xvxc345ssdsds-508"
+}
+```
 
 ---
 
@@ -146,9 +226,14 @@ curl http://localhost:8080/api/v1/plan/some-id -v
 ```
 
 **Expected response:**
-```
-HTTP/1.1 401 Unauthorized
-WWW-Authenticate: Bearer
+```json
+{
+  "timestamp": "2026-02-28T15:30:05Z",
+  "status": 401,
+  "error": "Unauthorized",
+  "message": "Authentication required: missing or invalid Bearer token",
+  "path": "/api/v1/plan/some-id"
+}
 ```
 
 ### 4.2 — Invalid/fake token → 401
@@ -179,9 +264,7 @@ curl -X POST http://localhost:8080/api/v1/plan \
   -d @samples/plan.json -v
 ```
 
-**Expected:** `201 Created` with `ETag` + `Location` headers, and:
-- App logs show: `Authenticated request: method=POST path=/api/v1/plan sub=<sub> email=<email>`
-- Response includes `X-User-Sub` and `X-User-Email` headers
+**Expected:** `201 Created` with `ETag` + `Location` headers.
 
 ### 4.5 — GET plan with valid token
 
@@ -195,7 +278,6 @@ curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
 ### 4.6 — DELETE plan with valid token + If-Match
 
 ```bash
-# First get the ETag from the GET response above, then:
 curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Authorization: Bearer $TOKEN" \
   -H 'If-Match: "<etag-value>"' -v
@@ -273,10 +355,7 @@ Request → Spring Security filter chain
 - Google Client ID from Step 1
 
 ```bash
-# Set your Google Client ID
 export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
-
-# Start everything
 docker compose up --build
 ```
 
@@ -311,7 +390,7 @@ curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
 ./mvnw test
 ```
 
-Tests use the `test` profile which uses `InMemoryKeyValueStore` and disables Spring Security auto-configuration. No Redis and no Google token required.
+Tests use the `test` profile which uses `InMemoryKeyValueStore`. No Redis and no Google token required.
 
 ---
 
@@ -329,53 +408,35 @@ curl http://localhost:8080/api/v1/schema/plan
 
 ---
 
-## Error Response Format
-
-```json
-{
-  "error": "ERROR_CODE",
-  "message": "Human-readable description",
-  "details": ["optional field-level errors"]
-}
-```
-
-| Code | HTTP Status | Meaning |
-|------|-------------|---------|
-| `VALIDATION_ERROR` | 400 | JSON Schema validation failed |
-| `INVALID_JSON` | 400 | Malformed JSON body |
-| `NOT_FOUND` | 404 | Resource does not exist |
-| `CONFLICT` | 409 | Duplicate objectId on POST |
-| `PRECONDITION_FAILED` | 412 | If-Match header didn't match stored ETag |
-| `INTERNAL_SERVER_ERROR` | 500 | Unexpected error |
-| *(Spring Security)* | 401 | Missing or invalid Bearer token |
-
----
-
 ## Architecture
 
 ```
 SchemaGuard/
-├── compose.yaml                                    ← Docker Compose (app + Redis)
-├── Dockerfile                                      ← Multi-stage ARM64/AMD64 build
+├── compose.yaml
+├── Dockerfile
 ├── docs/
-│   └── get-token.html                              ← Google sign-in token page for demo
+│   └── get-token.html
 ├── src/main/java/com/schemaguard/
 │   ├── config/
-│   │   ├── AppConfig.java                          ← ObjectMapper bean
-│   │   ├── RedisConfig.java                        ← Redis serialization (redis profile)
-│   │   └── SecurityConfig.java                     ← OAuth2 Resource Server, route rules
+│   │   ├── AppConfig.java
+│   │   ├── RedisConfig.java
+│   │   └── SecurityConfig.java          ← OAuth2 Resource Server + SecurityErrorHandler wired
 │   ├── security/
-│   │   └── JwtClaimsLogger.java                    ← Extracts sub/email, logs + headers
-│   ├── controller/      # PlanController, SchemaController
-│   ├── exception/       # GlobalExceptionHandler, custom exceptions
-│   ├── model/           # StoredDocument, ErrorResponse
-│   ├── store/           # KeyValueStore, InMemoryKeyValueStore, RedisKeyValueStore
-│   ├── util/            # EtagUtil (SHA-256), JsonUtil
-│   └── validation/      # SchemaValidator, SchemaValidationException
+│   │   ├── JwtClaimsLogger.java
+│   │   └── SecurityErrorHandler.java    ← AuthenticationEntryPoint + AccessDeniedHandler
+│   ├── controller/
+│   ├── exception/
+│   │   └── GlobalExceptionHandler.java  ← All exceptions → ApiError JSON
+│   ├── model/
+│   │   ├── ApiError.java                ← Canonical error shape
+│   │   └── StoredDocument.java
+│   ├── store/
+│   ├── util/
+│   └── validation/
 ├── src/main/resources/
-│   ├── schemas/plan-schema.json                    ← JSON Schema (single source of truth)
-│   ├── application.properties                      ← default profile = redis
-│   └── application-redis.properties                ← Redis + Google Client ID config
+│   ├── schemas/plan-schema.json
+│   ├── application.properties
+│   └── application-redis.properties
 └── src/test/resources/
-    └── application-test.properties                 ← test: InMemory, security disabled
+    └── application-test.properties
 ```
