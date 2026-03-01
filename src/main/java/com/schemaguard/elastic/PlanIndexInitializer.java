@@ -7,6 +7,7 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -77,9 +78,16 @@ public class PlanIndexInitializer {
             headers.setContentType(MediaType.APPLICATION_JSON);
             HttpEntity<String> request = new HttpEntity<>(INDEX_MAPPING, headers);
 
-            ResponseEntity<String> response = restTemplate.put(indexUrl, request, String.class);
-            // PUT returns 200 on success (no body needed)
-            log.info("Elasticsearch index '{}' initialized with parent-child mapping", INDEX_NAME);
+            // use exchange() — RestTemplate.put() returns void
+            ResponseEntity<String> response = restTemplate.exchange(
+                    indexUrl, HttpMethod.PUT, request, String.class);
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                log.info("Elasticsearch index '{}' initialized with parent-child mapping", INDEX_NAME);
+            } else {
+                log.warn("Elasticsearch index '{}' creation returned status {}",
+                        INDEX_NAME, response.getStatusCode());
+            }
 
         } catch (Exception ex) {
             log.warn("could not initialize Elasticsearch index '{}' — {}", INDEX_NAME, ex.getMessage());
