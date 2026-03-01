@@ -35,12 +35,6 @@ import java.util.Map;
  * 4. On all retries exhausted: do NOT ACK — message stays in PEL.
  *    It will be re-claimed on next startup via pending check.
  *
- * Idempotency:
- * - UPSERT/PATCH: IndexService uses ES upsert — safe to replay.
- * - DELETE: IndexService ignores missing docs — safe to replay.
- * - Consumer group + ACK ensures each message is processed exactly once
- *   under normal conditions; at-least-once on crash/retry.
- *
  * Active only on the 'redis' profile.
  */
 @Component
@@ -85,11 +79,6 @@ public class IndexWorker {
         this.splitter = splitter;
     }
 
-    /**
-     * Creates the consumer group on startup if it doesn't already exist.
-     * BUSYGROUP error means the group was already created — safe to ignore.
-     * Also logs any pending (unACKed) messages from previous runs.
-     */
     @PostConstruct
     public void initConsumerGroup() {
         try {
@@ -110,10 +99,6 @@ public class IndexWorker {
                 streamName, groupName, consumerName);
     }
 
-    /**
-     * Main polling loop. Runs every poll-interval-ms.
-     * Reads up to batchSize new messages and processes each one.
-     */
     @Scheduled(fixedDelayString = "${index.worker.poll-interval-ms:1000}")
     public void poll() {
         try {
@@ -134,10 +119,6 @@ public class IndexWorker {
         }
     }
 
-    /**
-     * Processes a single stream record with retry + exponential backoff.
-     * ACKs on success; leaves in PEL on all retries exhausted.
-     */
     private void handleWithRetry(MapRecord<String, Object, Object> record) {
         String messageId = record.getId().getValue();
         Map<Object, Object> fields = record.getValue();
@@ -201,13 +182,12 @@ public class IndexWorker {
     }
 
     /**
-     * On startup, checks for any pending (unACKed) messages from previous runs
-     * and logs the count. The next poll() call will re-deliver them automatically
-     * since they remain in the PEL under this consumer group.
+     * Checks for pending (unACKed) messages from previous runs and logs the count.
+     * Uses PendingMessages — the correct return type from opsForStream().pending().
      */
     private void reclaimPendingMessages() {
         try {
-            List<PendingMessage> pending = redisTemplate.opsForStream()
+            PendingMessages pending = redisTemplate.opsForStream()
                     .pending(streamName, groupName, Range.unbounded(), 100);
             if (pending != null && !pending.isEmpty()) {
                 log.info("IndexWorker found {} pending messages on startup — will reprocess",
