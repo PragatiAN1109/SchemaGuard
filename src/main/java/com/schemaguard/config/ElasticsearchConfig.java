@@ -1,32 +1,27 @@
 package com.schemaguard.config;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
-import co.elastic.clients.json.jackson.JacksonJsonpMapper;
-import co.elastic.clients.transport.ElasticsearchTransport;
-import co.elastic.clients.transport.rest_client.RestClientTransport;
-import org.apache.http.HttpHost;
-import org.elasticsearch.client.RestClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.elasticsearch.client.ClientConfiguration;
+import org.springframework.data.elasticsearch.client.elc.ElasticsearchConfiguration;
 
 /**
- * Wires the Elasticsearch Java API Client (co.elastic.clients) for Spring Boot 4.
+ * Wires the Elasticsearch client for Spring Boot 4 / Spring Data Elasticsearch 5.x.
  *
- * RestHighLevelClient was removed in Spring Boot 3+ / Elasticsearch 8.
- * We use the official new Java API Client backed by a low-level RestClient.
+ * Extends ElasticsearchConfiguration — Spring's official abstract base class.
+ * This exposes ElasticsearchClient and ElasticsearchOperations beans automatically.
+ * No manual RestClient or HttpHost wiring needed; Spring Data manages the transport.
  *
  * Connection is driven by environment variables:
  *   ELASTIC_HOST (default: localhost)
  *   ELASTIC_PORT (default: 9200)
  *
- * Security is disabled on the Elasticsearch side for local demo
- * (xpack.security.enabled=false in Docker Compose), so no credentials needed.
+ * xpack.security.enabled=false is set in Docker Compose so no credentials are needed.
  */
 @Configuration
-public class ElasticsearchConfig {
+public class ElasticsearchConfig extends ElasticsearchConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(ElasticsearchConfig.class);
 
@@ -36,22 +31,12 @@ public class ElasticsearchConfig {
     @Value("${elastic.port:9200}")
     private int port;
 
-    /**
-     * Low-level REST client — manages HTTP connections to Elasticsearch.
-     */
-    @Bean
-    public RestClient restClient() {
-        log.info("Configuring Elasticsearch REST client → {}:{}", host, port);
-        return RestClient.builder(new HttpHost(host, port, "http")).build();
-    }
-
-    /**
-     * High-level Java API Client — type-safe, fluent API for all ES operations.
-     */
-    @Bean
-    public ElasticsearchClient elasticsearchClient(RestClient restClient) {
-        ElasticsearchTransport transport = new RestClientTransport(
-                restClient, new JacksonJsonpMapper());
-        return new ElasticsearchClient(transport);
+    @Override
+    public ClientConfiguration clientConfiguration() {
+        String endpoint = host + ":" + port;
+        log.info("configuring Elasticsearch client → {}", endpoint);
+        return ClientConfiguration.builder()
+                .connectedTo(endpoint)
+                .build();
     }
 }
