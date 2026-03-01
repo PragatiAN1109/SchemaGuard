@@ -7,10 +7,10 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
-import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -18,7 +18,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 @Import(TestSecurityConfig.class)
-@WithMockUser  // Simulates an authenticated user for all tests in this class
 class PlanCrudIntegrationTest {
 
     @Autowired
@@ -64,6 +63,7 @@ class PlanCrudIntegrationTest {
     @Test
     void createPlan_returns201() throws Exception {
         mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(VALID_PLAN))
                 .andExpect(status().isCreated())
@@ -74,10 +74,12 @@ class PlanCrudIntegrationTest {
     @Test
     void getPlan_afterCreate_returns200() throws Exception {
         mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(VALID_PLAN));
 
-        mockMvc.perform(get("/api/v1/plan/12xvxc345ssdsds-508"))
+        mockMvc.perform(get("/api/v1/plan/12xvxc345ssdsds-508")
+                .with(jwt()))
                 .andExpect(status().isOk())
                 .andExpect(header().exists("ETag"));
     }
@@ -85,6 +87,7 @@ class PlanCrudIntegrationTest {
     @Test
     void getPlan_withMatchingEtag_returns304() throws Exception {
         var result = mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(VALID_PLAN))
                 .andReturn();
@@ -92,6 +95,7 @@ class PlanCrudIntegrationTest {
         String etag = result.getResponse().getHeader("ETag");
 
         mockMvc.perform(get("/api/v1/plan/12xvxc345ssdsds-508")
+                .with(jwt())
                 .header("If-None-Match", etag))
                 .andExpect(status().isNotModified());
     }
@@ -99,26 +103,31 @@ class PlanCrudIntegrationTest {
     @Test
     void deletePlan_returns204() throws Exception {
         mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(VALID_PLAN));
 
-        mockMvc.perform(delete("/api/v1/plan/12xvxc345ssdsds-508"))
+        mockMvc.perform(delete("/api/v1/plan/12xvxc345ssdsds-508")
+                .with(jwt()))
                 .andExpect(status().isNoContent());
     }
 
     @Test
     void getPlan_nonExistent_returns404() throws Exception {
-        mockMvc.perform(get("/api/v1/plan/does-not-exist"))
+        mockMvc.perform(get("/api/v1/plan/does-not-exist")
+                .with(jwt()))
                 .andExpect(status().isNotFound());
     }
 
     @Test
     void createPlan_duplicate_returns409() throws Exception {
         mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(VALID_PLAN));
 
         mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(VALID_PLAN))
                 .andExpect(status().isConflict());
