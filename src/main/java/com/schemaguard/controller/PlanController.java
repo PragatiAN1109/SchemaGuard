@@ -6,6 +6,9 @@ import com.schemaguard.exception.ConflictException;
 import com.schemaguard.exception.NotFoundException;
 import com.schemaguard.exception.PreconditionFailedException;
 import com.schemaguard.model.StoredDocument;
+import com.schemaguard.queue.IndexEvent;
+import com.schemaguard.queue.IndexEventOperation;
+import com.schemaguard.queue.IndexEventPublisher;
 import com.schemaguard.store.KeyValueStore;
 import com.schemaguard.util.JsonUtil;
 import com.schemaguard.validation.SchemaValidationException;
@@ -18,7 +21,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/v1/plan")
@@ -29,11 +31,16 @@ public class PlanController {
     private final KeyValueStore store;
     private final SchemaValidator schemaValidator;
     private final ObjectMapper objectMapper;
+    private final IndexEventPublisher eventPublisher;
 
-    public PlanController(KeyValueStore store, SchemaValidator schemaValidator, ObjectMapper objectMapper) {
+    public PlanController(KeyValueStore store,
+                          SchemaValidator schemaValidator,
+                          ObjectMapper objectMapper,
+                          IndexEventPublisher eventPublisher) {
         this.store = store;
         this.schemaValidator = schemaValidator;
         this.objectMapper = objectMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     // ---------------------------
@@ -59,6 +66,9 @@ public class PlanController {
 
         StoredDocument doc = store.get(objectId).orElseThrow();
 
+        // publish UPSERT event after successful create
+        eventPublisher.publish(IndexEvent.of(IndexEventOperation.UPSERT, objectId, doc.getEtag()));
+
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("objectId", objectId);
         response.put("etag", doc.getEtag());
@@ -72,9 +82,6 @@ public class PlanController {
 
     // ---------------------------
     // GET /api/v1/plan/{objectId}
-    // Conditional GET via If-None-Match.
-    // Strips surrounding quotes from If-None-Match before comparing
-    // so both quoted ("abc") and unquoted (abc) values work.
     // ---------------------------
     @GetMapping(value = "/{objectId}", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> getPlan(
@@ -100,8 +107,6 @@ public class PlanController {
 
     // ---------------------------
     // PUT /api/v1/plan/{objectId}
-    // Full replace. Supports optional If-Match for optimistic locking.
-    // If-Match present + mismatch → 412 Precondition Failed.
     // ---------------------------
     @PutMapping(
             value = "/{objectId}",
@@ -116,7 +121,6 @@ public class PlanController {
         StoredDocument existing = store.get(objectId)
                 .orElseThrow(() -> new NotFoundException("Plan not found: " + objectId));
 
-        // If-Match check — reject if ETag doesn't match
         if (ifMatch != null && !stripQuotes(ifMatch).equals(existing.getEtag())) {
             throw new PreconditionFailedException(
                     "ETag mismatch: document has been modified since you last fetched it");
@@ -126,6 +130,9 @@ public class PlanController {
         store.update(objectId, rawJson);
 
         StoredDocument updated = store.get(objectId).orElseThrow();
+
+        // publish UPSERT event after successful full replace
+        eventPublisher.publish(IndexEvent.of(IndexEventOperation.UPSERT, objectId, updated.getEtag()));
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("objectId", objectId);
@@ -139,7 +146,7 @@ public class PlanController {
 
     // ---------------------------
     // PATCH /api/v1/plan/{objectId}
-    // JSON Merge Patch (RFC 7396). Supports optional If-Match.
+    // JSON Merge Patch (RFC 7396)
     // ---------------------------
     @PatchMapping(
             value = "/{objectId}",
@@ -154,13 +161,11 @@ public class PlanController {
         StoredDocument existing = store.get(objectId)
                 .orElseThrow(() -> new NotFoundException("Plan not found: " + objectId));
 
-        // If-Match check
         if (ifMatch != null && !stripQuotes(ifMatch).equals(existing.getEtag())) {
             throw new PreconditionFailedException(
                     "ETag mismatch: document has been modified since you last fetched it");
         }
 
-        // Apply JSON Merge Patch (RFC 7396)
         String mergedJson;
         try {
             JsonNode target = objectMapper.readTree(existing.getJson());
@@ -174,11 +179,13 @@ public class PlanController {
             );
         }
 
-        // Re-validate merged document
         schemaValidator.validatePlanJson(mergedJson);
         store.update(objectId, mergedJson);
 
         StoredDocument updated = store.get(objectId).orElseThrow();
+
+        // publish PATCH event after successful merge-patch
+        eventPublisher.publish(IndexEvent.of(IndexEventOperation.PATCH, objectId, updated.getEtag()));
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
@@ -188,7 +195,6 @@ public class PlanController {
 
     // ---------------------------
     // DELETE /api/v1/plan/{objectId}
-    // Supports optional If-Match for conditional delete.
     // ---------------------------
     @DeleteMapping("/{objectId}")
     public ResponseEntity<Void> deletePlan(
@@ -198,13 +204,19 @@ public class PlanController {
         StoredDocument existing = store.get(objectId)
                 .orElseThrow(() -> new NotFoundException("Plan not found: " + objectId));
 
-        // If-Match check
         if (ifMatch != null && !stripQuotes(ifMatch).equals(existing.getEtag())) {
             throw new PreconditionFailedException(
                     "ETag mismatch: document has been modified since you last fetched it");
         }
 
+        // capture etag before deletion so the event carries the last known etag
+        String etagBeforeDelete = existing.getEtag();
+
         store.delete(objectId);
+
+        // publish DELETE event after successful deletion
+        eventPublisher.publish(IndexEvent.of(IndexEventOperation.DELETE, objectId, etagBeforeDelete));
+
         return ResponseEntity.noContent().build();
     }
 
@@ -240,13 +252,6 @@ public class PlanController {
     // ---------------------------
     // Helpers
     // ---------------------------
-
-    /**
-     * Strip surrounding double-quotes from an ETag value.
-     * HTTP clients may send If-Match as "abc123" or abc123 — both are valid.
-     * Our stored ETags are always unquoted SHA-256 strings.
-     * Spring's .eTag() call adds the quotes to the response header automatically.
-     */
     private String stripQuotes(String value) {
         if (value != null && value.startsWith("\"") && value.endsWith("\"") && value.length() >= 2) {
             return value.substring(1, value.length() - 1);
