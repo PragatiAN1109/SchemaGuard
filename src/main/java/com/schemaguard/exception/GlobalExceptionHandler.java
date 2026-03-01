@@ -1,81 +1,86 @@
 package com.schemaguard.exception;
 
-import com.schemaguard.model.ErrorResponse;
+import com.schemaguard.model.ApiError;
 import com.schemaguard.validation.SchemaValidationException;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-import java.util.List;
-
+/**
+ * Single global exception handler that maps every thrown exception to the
+ * canonical ApiError JSON contract:
+ *
+ *   { "timestamp", "status", "error", "message", "path" }
+ *
+ * No stack traces are ever included in the response body.
+ * Spring Security auth errors are handled separately via SecurityErrorHandler.
+ */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-    // 400 - schema validation failures
+    // ── 400 Bad Request — JSON Schema validation failure ──────────────────────
     @ExceptionHandler(SchemaValidationException.class)
-    public ResponseEntity<ErrorResponse> handleSchemaValidation(SchemaValidationException e) {
-        ErrorResponse body = new ErrorResponse(
-                "VALIDATION_ERROR",
-                e.getMessage(),
-                e.getErrors()
-        );
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+    public ResponseEntity<ApiError> handleSchemaValidation(
+            SchemaValidationException ex, HttpServletRequest req) {
+
+        String detail = ex.getErrors() != null && !ex.getErrors().isEmpty()
+                ? ex.getMessage() + " — " + String.join("; ", ex.getErrors())
+                : ex.getMessage();
+
+        return build(HttpStatus.BAD_REQUEST, detail, req);
     }
 
-    // 400 - malformed JSON (parse errors)
+    // ── 400 Bad Request — Malformed / unparseable JSON body ───────────────────
     @ExceptionHandler(HttpMessageNotReadableException.class)
-    public ResponseEntity<ErrorResponse> handleJsonParse(HttpMessageNotReadableException e) {
-        ErrorResponse body = new ErrorResponse(
-                "INVALID_JSON",
-                "Malformed JSON request body",
-                List.of(e.getMostSpecificCause() != null ? e.getMostSpecificCause().getMessage() : e.getMessage())
-        );
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+    public ResponseEntity<ApiError> handleJsonParse(
+            HttpMessageNotReadableException ex, HttpServletRequest req) {
+
+        String cause = ex.getMostSpecificCause() != null
+                ? ex.getMostSpecificCause().getMessage()
+                : ex.getMessage();
+        return build(HttpStatus.BAD_REQUEST, "Malformed JSON request body: " + cause, req);
     }
 
-    // 404 - not found
+    // ── 404 Not Found ─────────────────────────────────────────────────────────
     @ExceptionHandler(NotFoundException.class)
-    public ResponseEntity<ErrorResponse> handleNotFound(NotFoundException e) {
-        ErrorResponse body = new ErrorResponse(
-                "NOT_FOUND",
-                e.getMessage(),
-                List.of()
-        );
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
+    public ResponseEntity<ApiError> handleNotFound(
+            NotFoundException ex, HttpServletRequest req) {
+        return build(HttpStatus.NOT_FOUND, ex.getMessage(), req);
     }
 
-    // 409 - conflicts (duplicate objectId)
+    // ── 409 Conflict ──────────────────────────────────────────────────────────
     @ExceptionHandler(ConflictException.class)
-    public ResponseEntity<ErrorResponse> handleConflict(ConflictException e) {
-        ErrorResponse body = new ErrorResponse(
-                "CONFLICT",
-                e.getMessage(),
-                List.of()
-        );
-        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    public ResponseEntity<ApiError> handleConflict(
+            ConflictException ex, HttpServletRequest req) {
+        return build(HttpStatus.CONFLICT, ex.getMessage(), req);
     }
 
-    // 412 - precondition failed (If-Match mismatch)
+    // ── 412 Precondition Failed ───────────────────────────────────────────────
     @ExceptionHandler(PreconditionFailedException.class)
-    public ResponseEntity<ErrorResponse> handlePreconditionFailed(PreconditionFailedException e) {
-        ErrorResponse body = new ErrorResponse(
-                "PRECONDITION_FAILED",
-                e.getMessage(),
-                List.of()
-        );
-        return ResponseEntity.status(HttpStatus.PRECONDITION_FAILED).body(body);
+    public ResponseEntity<ApiError> handlePreconditionFailed(
+            PreconditionFailedException ex, HttpServletRequest req) {
+        return build(HttpStatus.PRECONDITION_FAILED, ex.getMessage(), req);
     }
 
-    // Fallback - 500
+    // ── 500 Internal Server Error — catch-all (no stack trace in body) ────────
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<ErrorResponse> handleGeneric(Exception e) {
-        ErrorResponse body = new ErrorResponse(
-                "INTERNAL_SERVER_ERROR",
-                "Unexpected error occurred",
-                List.of(e.getMessage())
+    public ResponseEntity<ApiError> handleGeneric(
+            Exception ex, HttpServletRequest req) {
+        // Log the real cause server-side; return a clean message to the client
+        return build(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred", req);
+    }
+
+    // ── Shared builder ────────────────────────────────────────────────────────
+    private ResponseEntity<ApiError> build(HttpStatus status, String message, HttpServletRequest req) {
+        ApiError body = new ApiError(
+                status.value(),
+                status.getReasonPhrase(),
+                message,
+                req.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
+        return ResponseEntity.status(status).body(body);
     }
 }
