@@ -2,12 +2,15 @@ package com.schemaguard.elastic;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.indices.CreateIndexResponse;
-import co.elastic.clients.elasticsearch.indices.ExistsRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestTemplate;
 
 import static com.schemaguard.elastic.PlanIndexConstants.INDEX_NAME;
 
@@ -16,27 +19,18 @@ import static com.schemaguard.elastic.PlanIndexConstants.INDEX_NAME;
  * on application startup, if it does not already exist.
  *
  * Why ApplicationReadyEvent instead of @PostConstruct:
- * @PostConstruct fires during bean initialization, before the full application
- * context is confirmed live. The Elasticsearch connection may not be established
- * yet at that point. ApplicationReadyEvent fires after everything is up,
- * guaranteeing the ElasticsearchClient can actually reach the cluster.
+ * @PostConstruct fires during bean initialization before all connections are live.
+ * ApplicationReadyEvent fires after the full context is up and Elasticsearch
+ * is confirmed reachable.
+ *
+ * Why plain HTTP for the existence check:
+ * The Elasticsearch Java API Client's indices.exists() throws on any unexpected
+ * response body shape (including the empty-body 404 Elasticsearch returns for
+ * missing indices). A plain HEAD/GET via RestTemplate is simpler and reliable.
  *
  * Why plain JSON mapping instead of Spring Data @Document annotations:
  * Elasticsearch join fields (parent-child) are not supported by Spring Data's
- * annotation model. The mapping must be defined as raw JSON and sent via the
- * low-level ElasticsearchClient.
- *
- * Index mapping:
- * - dynamic: true         — all plan JSON fields stored without pre-declaring them
- * - my_join_field         — join type; defines plan → child relation
- * - objectId (keyword)    — exact-match capable field for plan ID lookups
- * - objectType (keyword)  — filter by document type
- *
- * Routing:
- * - parent docs: routing = own objectId (Elasticsearch default)
- * - child docs:  routing = parentId (MUST be set explicitly at index and query time)
- *   This guarantees parent and child land on the same shard, required for
- *   has_child, has_parent, and parent_id join queries.
+ * annotation model. The mapping must be sent as raw JSON via ElasticsearchClient.
  */
 @Component
 public class PlanIndexInitializer {
@@ -66,23 +60,22 @@ public class PlanIndexInitializer {
             """;
 
     private final ElasticsearchClient esClient;
+    private final RestTemplate restTemplate = new RestTemplate();
+
+    @Value("${elastic.host:localhost}")
+    private String host;
+
+    @Value("${elastic.port:9200}")
+    private int port;
 
     public PlanIndexInitializer(ElasticsearchClient esClient) {
         this.esClient = esClient;
     }
 
-    /**
-     * Runs after the full application context is started and all connections
-     * are confirmed live. Idempotent: skips creation if the index already exists.
-     */
     @EventListener(ApplicationReadyEvent.class)
     public void initIndex() {
         try {
-            boolean exists = esClient.indices()
-                    .exists(ExistsRequest.of(r -> r.index(INDEX_NAME)))
-                    .value();
-
-            if (exists) {
+            if (indexExists()) {
                 log.info("Elasticsearch index '{}' already exists — skipping creation", INDEX_NAME);
                 return;
             }
@@ -101,6 +94,23 @@ public class PlanIndexInitializer {
 
         } catch (Exception ex) {
             log.warn("could not initialize Elasticsearch index '{}' — {}", INDEX_NAME, ex.getMessage());
+        }
+    }
+
+    /**
+     * Checks whether the index exists using a plain HTTP GET.
+     * Returns true if Elasticsearch responds with 200, false on 404.
+     * Avoids the ElasticsearchClient indices.exists() quirk where an
+     * empty-body response causes a deserialization error.
+     */
+    private boolean indexExists() {
+        String url = "http://" + host + ":" + port + "/" + INDEX_NAME;
+        try {
+            ResponseEntity<String> resp = restTemplate.getForEntity(url, String.class);
+            return resp.getStatusCode() == HttpStatus.OK;
+        } catch (Exception ex) {
+            // 404 or connection error — treat as does not exist
+            return false;
         }
     }
 }
