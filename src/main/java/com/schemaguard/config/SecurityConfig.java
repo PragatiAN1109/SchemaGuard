@@ -22,12 +22,16 @@ import java.util.List;
 /**
  * OAuth2 Resource Server security configuration.
  *
- * All /api/v1/plan/** endpoints require a valid Google RS256 Bearer token.
- * GET /api/v1/schema/** is public — no authentication required.
+ * Protected routes (Bearer token required):
+ *   /api/v1/plan/**
+ *
+ * Public routes (no auth):
+ *   /api/v1/schema/**
+ *   /api/v1/index/**   — index admin/health endpoints (demo only)
  *
  * Security error handling is overridden via SecurityErrorHandler so that
  * 401 and 403 responses follow the same ApiError JSON contract as the rest
- * of the API (no HTML, no Spring Security default response format).
+ * of the API.
  */
 @Configuration
 @EnableWebSecurity
@@ -50,23 +54,19 @@ public class SecurityConfig {
         http
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .csrf(csrf -> csrf.disable())
-
-            // Override Spring Security default error responses with ApiError JSON
             .exceptionHandling(ex -> ex
-                .authenticationEntryPoint(securityErrorHandler)   // 401
-                .accessDeniedHandler(securityErrorHandler)         // 403
+                .authenticationEntryPoint(securityErrorHandler)
+                .accessDeniedHandler(securityErrorHandler)
             )
-
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/api/v1/schema/**").permitAll()
+                // index admin endpoints are public — demo/debug only, no data exposed
+                .requestMatchers("/api/v1/index/**").permitAll()
                 .requestMatchers("/api/v1/plan/**").authenticated()
                 .anyRequest().authenticated()
             )
-
             .oauth2ResourceServer(oauth2 -> oauth2
                 .jwt(jwt -> jwt.decoder(jwtDecoder()))
-                // Also override the entry point inside the resource-server DSL
-                // so that token validation failures (bad sig, expired) hit our handler
                 .authenticationEntryPoint(securityErrorHandler)
             );
 
