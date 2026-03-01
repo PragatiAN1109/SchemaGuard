@@ -58,6 +58,13 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Spring Security test support — provides @WithMockUser for integration tests -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Redis support -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
