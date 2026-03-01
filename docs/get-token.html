@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SchemaGuard — Get Google ID Token</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    h1 { font-size: 1.4rem; }
+    #token-box { width: 100%; height: 120px; font-size: 0.75rem; margin-top: 10px; }
+    #status { margin-top: 10px; color: green; font-weight: bold; }
+    button { margin-top: 10px; padding: 8px 16px; font-size: 1rem; cursor: pointer; }
+    .instructions { background: #f4f4f4; padding: 12px; border-radius: 4px; margin-top: 20px; }
+    code { background: #e8e8e8; padding: 2px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>SchemaGuard — Google ID Token Demo</h1>
+  <p>Sign in with Google to get an RS256 ID token you can use to call the API.</p>
+
+  <!--
+    SETUP REQUIRED:
+    Replace YOUR_GOOGLE_CLIENT_ID below with your actual Google OAuth2 Client ID.
+    The Client ID looks like: 123456789-abc.apps.googleusercontent.com
+
+    In Google Cloud Console:
+    1. APIs & Services → Credentials → Your OAuth 2.0 Client
+    2. Add http://localhost:5500 (or wherever you serve this file) to "Authorized JavaScript origins"
+  -->
+
+  <div id="g_id_onload"
+       data-client_id="YOUR_GOOGLE_CLIENT_ID"
+       data-callback="handleCredentialResponse"
+       data-auto_prompt="false">
+  </div>
+  <div class="g_id_signin" data-type="standard"></div>
+
+  <div id="status"></div>
+
+  <label for="token-box"><strong>Your ID Token (copy this):</strong></label>
+  <textarea id="token-box" placeholder="Sign in above — your token will appear here"></textarea>
+
+  <button onclick="copyToken()">Copy Token</button>
+  <button onclick="document.getElementById('token-box').value=''; document.getElementById('status').textContent=''">Clear</button>
+
+  <div class="instructions">
+    <strong>How to use this token:</strong>
+    <pre>
+# 1. Copy the token from the box above
+
+# 2. Call the API (replace TOKEN with your copied token):
+curl -X POST http://localhost:8080/api/v1/plan \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer TOKEN" \
+  -d @samples/plan.json
+
+# 3. Verify it's RS256 — paste the token at https://jwt.io
+#    You'll see: "alg": "RS256" in the header section
+
+# 4. No token → 401:
+curl http://localhost:8080/api/v1/plan/some-id
+# returns: 401 Unauthorized
+
+# 5. Schema endpoint is public (no token needed):
+curl http://localhost:8080/api/v1/schema/plan
+# returns: 200 OK with the JSON Schema
+    </pre>
+  </div>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script>
+    function handleCredentialResponse(response) {
+      const token = response.credential;
+      document.getElementById('token-box').value = token;
+      document.getElementById('status').textContent = '✅ Token obtained! Copy it and use it in your curl commands.';
+
+      // Decode and display claims (no verification here — just display)
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        document.getElementById('status').textContent +=
+          ' | sub: ' + payload.sub + ' | email: ' + payload.email;
+      } catch(e) {}
+    }
+
+    function copyToken() {
+      const box = document.getElementById('token-box');
+      box.select();
+      document.execCommand('copy');
+      alert('Token copied to clipboard!');
+    }
+  </script>
+</body>
+</html>

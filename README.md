@@ -1,129 +1,306 @@
 # SchemaGuard
 
-A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag support for efficient caching, and Redis as the primary persistent store.
+A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, and Google OAuth2 JWT security.
 
 ## Overview
 
-SchemaGuard is a RESTful web service that provides full CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation to ensure data integrity, supports conditional GET/PUT/PATCH/DELETE using ETags to prevent lost updates, and implements JSON Merge Patch (RFC 7396) for partial updates.
+SchemaGuard is a RESTful web service that provides full CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation, supports conditional GET/PUT/PATCH/DELETE using ETags, implements JSON Merge Patch (RFC 7396), and secures all plan endpoints using Google RS256 Bearer tokens.
 
 ## Features
 
-- JSON Schema Validation for all incoming plan data (POST, PUT, and post-patch on PATCH)
+- JSON Schema Validation for all incoming plan data (POST, PUT, PATCH)
 - Full CRUD: POST, GET, PUT (replace), PATCH (JSON Merge Patch), DELETE
-- ETag support for conditional GET requests (SHA-256 based)
-- ETag updated on every write (POST, PUT, PATCH)
-- **Conditional writes: `If-Match` on PUT/PATCH/DELETE → 412 Precondition Failed on mismatch**
-- **Conditional reads: `If-None-Match` on GET → 304 Not Modified when unchanged**
-- **Standalone JSON Schema file — retrievable at `GET /api/v1/schema/plan`**
-- **Redis as primary store — data persists across app restarts**
-- **Docker Compose for one-command demo startup**
-- Comprehensive error handling with detailed validation messages
-- Spring Boot 4.0.2 framework
+- ETag support for conditional requests (SHA-256 based)
+- **Google OAuth2 RS256 JWT security — all `/api/v1/plan/**` endpoints require a valid Bearer token**
+- **Public endpoint: `GET /api/v1/schema/plan` — no auth required**
+- Redis as primary store — data persists across app restarts
+- Docker Compose for one-command demo startup
 
-## Spring Profile → Storage Backend Mapping
+## Spring Profile → Storage + Security Mapping
 
-| Profile | Storage Backend | When Used |
-|---------|----------------|-----------|
-| `redis` (default) | `RedisKeyValueStore` | All runtime and demo deployments |
-| `test` | `InMemoryKeyValueStore` | `./mvnw test` only — no Redis required |
-
-The default active profile is `redis`. No manual configuration is needed to run the demo.
+| Profile | Storage Backend | Security |
+|---------|----------------|----------|
+| `redis` (default) | `RedisKeyValueStore` | Google JWT enforced |
+| `test` | `InMemoryKeyValueStore` | Security auto-config excluded |
 
 ---
 
-## Demo Runbook — Docker Compose (Recommended)
+## Task 5 — Google IDP Security
 
-### Prerequisites
-- Docker + Docker Compose installed
+### How It Works
 
-### 1. Start everything with one command
+SchemaGuard is configured as an **OAuth2 Resource Server**. Every request to `/api/v1/plan/**` must include a valid `Authorization: Bearer <token>` header. The token is:
+
+1. A Google ID token (RS256-signed JWT)
+2. Validated against Google's public JWK Set: `https://www.googleapis.com/oauth2/v3/certs`
+3. Issuer checked: must be `https://accounts.google.com`
+4. Audience checked: must contain your Google Client ID
+
+On success, the server logs `sub` and `email` from the token and adds `X-User-Sub` / `X-User-Email` response headers.
+
+---
+
+## Step 1 — Google Cloud Console Setup
+
+### 1.1 Create a Google Cloud Project
+
+1. Go to [https://console.cloud.google.com](https://console.cloud.google.com)
+2. Click the project dropdown → **New Project**
+3. Name it `SchemaGuard-Demo` and click **Create**
+
+### 1.2 Configure OAuth Consent Screen
+
+1. Navigate to **APIs & Services → OAuth consent screen**
+2. Choose **External** → **Create**
+3. Fill in:
+   - App name: `SchemaGuard`
+   - User support email: your email
+   - Developer contact email: your email
+4. Click **Save and Continue** through the remaining steps
+5. Under **Test users**, add your own Google email address
+6. Click **Back to Dashboard**
+
+### 1.3 Create OAuth 2.0 Client ID
+
+1. Go to **APIs & Services → Credentials**
+2. Click **Create Credentials → OAuth client ID**
+3. Application type: **Web application**
+4. Name: `SchemaGuard Web Client`
+5. Under **Authorized JavaScript origins**, add:
+   ```
+   http://localhost:5500
+   http://localhost:8080
+   ```
+   *(Add whatever host you'll serve `docs/get-token.html` from)*
+6. Click **Create**
+7. **Copy the Client ID** — it looks like: `123456789-abc123.apps.googleusercontent.com`
+
+---
+
+## Step 2 — Obtain a Google ID Token (Demo)
+
+### Option A — HTML Token Page (Recommended)
+
+A ready-made token page is included at `docs/get-token.html`.
+
+**Setup:**
+1. Open `docs/get-token.html` in a text editor
+2. Replace `YOUR_GOOGLE_CLIENT_ID` with your actual Client ID
+3. Serve it locally (any static server works):
 
 ```bash
+# Option 1: Python
+cd docs && python3 -m http.server 5500
+
+# Option 2: Node npx
+cd docs && npx serve -p 5500
+
+# Option 3: VS Code Live Server extension — just open get-token.html
+```
+
+4. Open `http://localhost:5500/get-token.html` in a browser
+5. Click **Sign in with Google**
+6. **Copy the token** from the text box — this is your Bearer token
+
+The page also displays the decoded `sub` and `email` from the token so you can verify it worked.
+
+### Option B — curl with OAuth Playground
+
+1. Go to [https://developers.google.com/oauthplayground](https://developers.google.com/oauthplayground)
+2. Click the settings gear (⚙) → check **Use your own OAuth credentials**
+3. Enter your Client ID and Client Secret
+4. In Step 1, find **Google OAuth2 API v2** → select `openid`, `email`
+5. Click **Authorize APIs** → sign in
+6. In Step 2, click **Exchange authorization code for tokens**
+7. Copy the `id_token` value from the response
+
+---
+
+## Step 3 — Start the Application
+
+### Local run (Redis must be running):
+
+```bash
+export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+./mvnw spring-boot:run
+```
+
+### Docker Compose:
+
+```bash
+export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
 docker compose up --build
 ```
 
-This will:
-- Build the SchemaGuard app image from the repo
-- Start a Redis 7 container with a named volume (`redis-data`) for persistence
-- Start the SchemaGuard app connected to Redis
-- Expose the API on `http://localhost:8080`
+---
 
-Wait for both containers to be healthy (you'll see `Started SchemaGuardApplication` in the logs).
+## Step 4 — Demo the Security (Copy-Paste Commands)
 
-### 2. Create a plan
+> Replace `<TOKEN>` with the token you obtained in Step 2.
+> Replace `<YOUR_CLIENT_ID>` with your actual Google Client ID.
+
+### 4.1 — Unauthenticated request → 401
 
 ```bash
+curl http://localhost:8080/api/v1/plan/some-id -v
+```
+
+**Expected response:**
+```
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+```
+
+### 4.2 — Invalid/fake token → 401
+
+```bash
+curl http://localhost:8080/api/v1/plan/some-id \
+  -H "Authorization: Bearer this.is.not.a.valid.token" -v
+```
+
+**Expected:** `401 Unauthorized` — signature validation fails against Google's public keys.
+
+### 4.3 — Schema endpoint is public — no token needed
+
+```bash
+curl http://localhost:8080/api/v1/schema/plan
+```
+
+**Expected:** `200 OK` with full JSON Schema — no `Authorization` header required.
+
+### 4.4 — Valid Google token → 200 (POST a plan)
+
+```bash
+TOKEN="<paste your Google ID token here>"
+
 curl -X POST http://localhost:8080/api/v1/plan \
   -H "Content-Type: application/json" \
-  -d @samples/plan.json
+  -H "Authorization: Bearer $TOKEN" \
+  -d @samples/plan.json -v
 ```
 
-**Expected:** `201 Created` with an `ETag` header.
+**Expected:** `201 Created` with `ETag` + `Location` headers, and:
+- App logs show: `Authenticated request: method=POST path=/api/v1/plan sub=<sub> email=<email>`
+- Response includes `X-User-Sub` and `X-User-Email` headers
 
-### 3. Verify the plan is stored in Redis
+### 4.5 — GET plan with valid token
 
 ```bash
-# Open a redis-cli session inside the Redis container
-docker exec -it schemaguard-redis redis-cli
-
-# List all plan keys
-KEYS *
-
-# Get the stored plan document
-GET plan:12xvxc345ssdsds-508
-
-# Exit redis-cli
-exit
+curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Authorization: Bearer $TOKEN" -v
 ```
 
-### 4. Prove data persists across app restarts
+**Expected:** `200 OK` with plan body.
+
+### 4.6 — DELETE plan with valid token + If-Match
 
 ```bash
-# Restart only the app container (Redis keeps running — data is still in the named volume)
-docker compose restart app
-
-# Wait ~10 seconds for the app to come back up, then GET the same plan
-curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
+# First get the ETag from the GET response above, then:
+curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'If-Match: "<etag-value>"' -v
 ```
 
-**Expected:** `200 OK` with the same plan data — proves Redis persistence across app restarts.
-
-### 5. Prove data persists across full stack restarts
-
-```bash
-# Stop everything
-docker compose down
-
-# Start again (no --build needed since nothing changed)
-docker compose up
-
-# GET the plan — still there because the named volume redis-data was preserved
-curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
-```
-
-**Expected:** `200 OK` — data survived a full `down` + `up` cycle.
-
-### 6. Stop and clean up
-
-```bash
-# Stop containers (keep data volume)
-docker compose down
-
-# Stop and delete all data (full reset)
-docker compose down -v
-```
+**Expected:** `204 No Content`
 
 ---
 
-## Running Locally Without Docker
+## Step 5 — Verify RS256 Using jwt.io
+
+1. Copy your Google ID token
+2. Go to [https://jwt.io](https://jwt.io)
+3. Paste the token into the **Encoded** box on the left
+4. In the **Header** section (top right), you'll see:
+   ```json
+   {
+     "alg": "RS256",
+     "kid": "...",
+     "typ": "JWT"
+   }
+   ```
+5. The **Payload** section shows your claims:
+   ```json
+   {
+     "iss": "https://accounts.google.com",
+     "aud": "<your-client-id>.apps.googleusercontent.com",
+     "sub": "1234567890",
+     "email": "you@gmail.com",
+     ...
+   }
+   ```
+
+The API validates the signature using Google's public keys fetched from:
+`https://www.googleapis.com/oauth2/v3/certs`
+
+---
+
+## Security Architecture
+
+```
+Request → Spring Security filter chain
+           ↓
+       Authorization: Bearer <token> present?
+           ↓ yes
+       Fetch Google public keys (JWK Set URI)
+           ↓
+       Verify RS256 signature
+           ↓
+       Validate issuer = https://accounts.google.com
+           ↓
+       Validate audience contains GOOGLE_CLIENT_ID
+           ↓
+       JwtClaimsLogger: log sub + email, set X-User-Sub/X-User-Email headers
+           ↓
+       Route to controller
+```
+
+**Public routes (no auth):**
+- `GET /api/v1/schema/**`
+
+**Protected routes (Bearer token required):**
+- `GET /api/v1/plan/**`
+- `POST /api/v1/plan`
+- `PUT /api/v1/plan/**`
+- `PATCH /api/v1/plan/**`
+- `DELETE /api/v1/plan/**`
+
+---
+
+## Demo Runbook — Docker Compose
 
 ### Prerequisites
-- Java 17+, Maven 3.6+
-- Redis running locally (`redis-server` or `brew services start redis`)
+- Docker + Docker Compose installed
+- Google Client ID from Step 1
 
 ```bash
-# Redis profile is active by default — connects to localhost:6379
-./mvnw spring-boot:run
+# Set your Google Client ID
+export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+
+# Start everything
+docker compose up --build
+```
+
+Wait for `Started SchemaGuardApplication` in the logs.
+
+### Verify Redis + Security together
+
+```bash
+TOKEN="<your Google ID token>"
+
+# 1. Create a plan (authenticated)
+curl -X POST http://localhost:8080/api/v1/plan \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d @samples/plan.json
+
+# 2. Verify it's in Redis
+docker exec -it schemaguard-redis redis-cli KEYS "plan:*"
+
+# 3. Restart app — data persists, auth still works
+docker compose restart app
+curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Authorization: Bearer $TOKEN"
+# Expected: 200 OK
 ```
 
 ---
@@ -134,148 +311,21 @@ docker compose down -v
 ./mvnw test
 ```
 
-Tests use the `test` profile which activates `InMemoryKeyValueStore`. **No Redis required** to run the test suite.
+Tests use the `test` profile which uses `InMemoryKeyValueStore` and disables Spring Security auto-configuration. No Redis and no Google token required.
 
 ---
 
 ## JSON Schema
 
-### Schema File Location
-
+Schema file location:
 ```
 src/main/resources/schemas/plan-schema.json
 ```
 
-This file is the **single source of truth** for plan validation. It is loaded from the classpath at startup and used to validate every write operation.
-
-| Operation | Schema Validation |
-|-----------|------------------|
-| `POST /api/v1/plan` | ✅ Full schema validation on request body |
-| `PUT /api/v1/plan/{id}` | ✅ Full schema validation on replacement body |
-| `PATCH /api/v1/plan/{id}` | ✅ Schema validation on the **fully merged** document |
-| `GET /api/v1/plan/{id}` | ❌ Read-only, no validation |
-| `DELETE /api/v1/plan/{id}` | ❌ No body, no validation |
-
-### Retrieve the Schema
-
+Retrieve at runtime (public endpoint — no auth needed):
 ```bash
 curl http://localhost:8080/api/v1/schema/plan
 ```
-
----
-
-## API Endpoints
-
-### POST /api/v1/plan — Create a Plan
-
-```bash
-curl -X POST http://localhost:8080/api/v1/plan \
-  -H "Content-Type: application/json" \
-  -d @samples/plan.json
-```
-
-**Success:** `201 Created` + `ETag` + `Location`
-**Errors:** `400` schema invalid · `409` objectId already exists
-
-**Validation failure example:**
-```bash
-curl -X POST http://localhost:8080/api/v1/plan \
-  -H "Content-Type: application/json" \
-  -d '{
-    "_org": "example.com",
-    "objectId": "bad-plan-001",
-    "planType": "inNetwork",
-    "creationDate": "01-01-2025",
-    "planCostShares": {
-      "deductible": 500, "_org": "example.com", "copay": 10,
-      "objectId": "cs-001", "objectType": "membercostshare"
-    },
-    "linkedPlanServices": []
-  }'
-```
-
-Expected `400`:
-```json
-{
-  "error": "VALIDATION_ERROR",
-  "message": "JSON Schema validation failed",
-  "details": [
-    "$.objectType: is missing but it is required",
-    "$.linkedPlanServices: must have at least 1 items but found 0"
-  ]
-}
-```
-
----
-
-### GET /api/v1/plan/{objectId} — Retrieve a Plan
-
-```bash
-# Full fetch
-curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
-
-# Conditional GET — 304 if unchanged
-curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H 'If-None-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"'
-```
-
----
-
-### GET /api/v1/schema/plan — Retrieve the JSON Schema
-
-```bash
-curl http://localhost:8080/api/v1/schema/plan
-```
-
----
-
-### PUT /api/v1/plan/{objectId} — Replace a Plan
-
-```bash
-curl -X PUT http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H "Content-Type: application/json" \
-  -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"' \
-  -d @samples/plan.json
-```
-
-**Errors:** `400` · `404` · `412`
-
----
-
-### PATCH /api/v1/plan/{objectId} — Partial Update
-
-```bash
-curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H "Content-Type: application/merge-patch+json" \
-  -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"' \
-  -d '{ "planType": "outOfNetwork" }'
-```
-
-**Errors:** `400` · `404` · `412`
-
----
-
-### DELETE /api/v1/plan/{objectId} — Delete a Plan
-
-```bash
-curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H 'If-Match: "4a5b6e65a673ea3d00e737af24d19a0922b9d2553656a64cc2ecba039573fd6b"'
-```
-
-**Success:** `204 No Content`
-**Errors:** `404` · `412`
-
----
-
-## ETag Behaviour
-
-| Operation | ETag Changes? |
-|-----------|--------------|
-| POST | ✅ New ETag generated |
-| GET | ❌ Read only |
-| PUT | ✅ New ETag (SHA-256 of new body) |
-| PATCH | ✅ New ETag (SHA-256 of merged body) |
-| DELETE | N/A |
 
 ---
 
@@ -297,6 +347,7 @@ curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
 | `CONFLICT` | 409 | Duplicate objectId on POST |
 | `PRECONDITION_FAILED` | 412 | If-Match header didn't match stored ETag |
 | `INTERNAL_SERVER_ERROR` | 500 | Unexpected error |
+| *(Spring Security)* | 401 | Missing or invalid Bearer token |
 
 ---
 
@@ -304,9 +355,17 @@ curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
 
 ```
 SchemaGuard/
-├── compose.yaml                              ← Docker Compose (app + Redis)
-├── Dockerfile                                ← Multi-stage build
+├── compose.yaml                                    ← Docker Compose (app + Redis)
+├── Dockerfile                                      ← Multi-stage ARM64/AMD64 build
+├── docs/
+│   └── get-token.html                              ← Google sign-in token page for demo
 ├── src/main/java/com/schemaguard/
+│   ├── config/
+│   │   ├── AppConfig.java                          ← ObjectMapper bean
+│   │   ├── RedisConfig.java                        ← Redis serialization (redis profile)
+│   │   └── SecurityConfig.java                     ← OAuth2 Resource Server, route rules
+│   ├── security/
+│   │   └── JwtClaimsLogger.java                    ← Extracts sub/email, logs + headers
 │   ├── controller/      # PlanController, SchemaController
 │   ├── exception/       # GlobalExceptionHandler, custom exceptions
 │   ├── model/           # StoredDocument, ErrorResponse
@@ -314,12 +373,9 @@ SchemaGuard/
 │   ├── util/            # EtagUtil (SHA-256), JsonUtil
 │   └── validation/      # SchemaValidator, SchemaValidationException
 ├── src/main/resources/
-│   ├── schemas/plan-schema.json              ← JSON Schema (single source of truth)
-│   ├── application.properties               ← default profile = redis
-│   └── application-redis.properties         ← Redis connection (host/port via env vars)
-├── src/test/resources/
-│   └── application-test.properties          ← test profile = InMemory, port=0
-└── samples/
-    ├── plan.json
-    └── invalid.json
+│   ├── schemas/plan-schema.json                    ← JSON Schema (single source of truth)
+│   ├── application.properties                      ← default profile = redis
+│   └── application-redis.properties                ← Redis + Google Client ID config
+└── src/test/resources/
+    └── application-test.properties                 ← test: InMemory, security disabled
 ```
