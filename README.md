@@ -1,6 +1,6 @@
 # SchemaGuard
 
-A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch parent-child indexing, Redis Streams event publishing, and Google OAuth2 JWT security.
+A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch parent-child indexing, Redis Streams event publishing + consumer worker, and Google OAuth2 JWT security.
 
 ## overview
 
@@ -16,7 +16,8 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 - **standardized error contract — every error returns the same JSON shape**
 - Redis as primary KV store — data persists across app restarts
 - **Redis Streams event publishing — UPSERT/PATCH/DELETE events on every successful write**
-- Elasticsearch parent-child index — `plans-index` created on startup with join mapping
+- **IndexWorker — background consumer that reads events and syncs Elasticsearch**
+- Elasticsearch parent-child index — `plans-index` with join mapping
 - `IndexService` abstraction — clean interface for all ES index operations
 - Docker Compose for one-command demo startup
 
@@ -31,91 +32,84 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 
 ## starting the full stack
 
-### prerequisites
-- Docker + Docker Compose installed
-- Google Client ID (see Google IDP security section below)
-
-### start all services
-
 ```bash
 export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
 docker compose up --build
 ```
 
-This starts three services:
-- **Redis** on port `6379`
-- **Elasticsearch** on port `9200`
-- **SchemaGuard app** on port `8080`
+Starts three services: **Redis** (6379), **Elasticsearch** (9200), **app** (8080).
 
-Look for these lines in the app logs to confirm everything is up:
+Expected startup logs:
 ```
-configuring Elasticsearch client → elasticsearch:9200
+IndexWorker created consumer group 'schemaguard-indexers' on stream 'schemaguard:index-events'
+IndexWorker started (stream=schemaguard:index-events, group=schemaguard-indexers, consumer=indexer-1)
 Elasticsearch index 'plans-index' initialized with parent-child mapping
-Elasticsearch cluster reachable at http://elasticsearch:9200
 Started SchemaGuardApplication
 ```
 
 ---
 
-## queueing (Redis Streams)
+## IndexWorker — Redis Streams consumer
 
-Every successful write operation publishes an event to the Redis Stream `schemaguard:index-events`.
-The stream is created automatically on first write — no manual setup required.
+`IndexWorker` is a background `@Scheduled` component (active on `redis` profile only) that
+consumes events from the Redis Stream and synchronises Elasticsearch.
 
-### event structure
+### flow
 
-Each stream entry contains these fields:
-
-| field | example value | description |
-|-------|---------------|-------------|
-| `eventId` | `a3f2...` | UUID, unique per event |
-| `operation` | `UPSERT` | `UPSERT`, `PATCH`, or `DELETE` |
-| `documentId` | `12xvxc345ssdsds-508` | plan objectId |
-| `resourceType` | `plan` | always `plan` for now |
-| `etag` | `sha256hex...` | ETag at time of event |
-| `timestamp` | `2026-03-01T14:00:00Z` | ISO-8601 instant |
-
-### when events are published
-
-| operation | event type | condition |
-|-----------|------------|----------|
-| `POST /api/v1/plan` | `UPSERT` | only on 201 Created |
-| `PUT /api/v1/plan/{id}` | `UPSERT` | only on 200 OK |
-| `PATCH /api/v1/plan/{id}` | `PATCH` | only on 200 OK |
-| `DELETE /api/v1/plan/{id}` | `DELETE` | only on 204 No Content |
-
-Events are **never** published for failed operations (400 / 404 / 409 / 412).
-
-### fire-and-forget tradeoff
-
-Publishing is non-blocking and non-fatal. If a stream write fails, the API returns success
-to the client and logs a warning. This prioritises API stability over strict event durability
-for the demo. In a production system, a transactional outbox pattern would be used instead.
-
-### viewing events in Redis
-
-```bash
-# open redis-cli inside the container
-docker exec -it schemaguard-redis redis-cli
-
-# read all events from the stream
-XRANGE schemaguard:index-events - +
-
-# read only the last 5 events
-XREVRANGE schemaguard:index-events + - COUNT 5
-
-# count total events
-XLEN schemaguard:index-events
+```
+POST /api/v1/plan
+  → KV store (Redis)
+  → publish UPSERT to stream
+  → IndexWorker picks up event (within ~1s)
+  → fetches doc from KV store
+  → IndexService.indexParent() + indexChild() per linkedPlanService
+  → Elasticsearch updated
+  → XACK (message removed from PEL)
 ```
 
-### demo: generate and inspect events
+### parent-child split
 
-**step 1 — set your token:**
+| document | ES type | routing |
+|----------|---------|--------|
+| plan (top-level) | parent | own objectId (default) |
+| each `linkedPlanServices` entry | child | parentId (plan objectId) |
+
+The `planCostShares` object and nested cost shares are stored within the parent document
+(searchable via dynamic mapping), not as separate child documents.
+
+### stream / group / consumer config
+
+| config key | env var | default |
+|------------|---------|--------|
+| `index.events.stream` | `INDEX_EVENTS_STREAM` | `schemaguard:index-events` |
+| `index.worker.group` | `INDEX_WORKER_GROUP` | `schemaguard-indexers` |
+| `index.worker.consumer` | `INDEX_WORKER_CONSUMER` | `indexer-1` |
+| `index.worker.batch-size` | `INDEX_WORKER_BATCH_SIZE` | `10` |
+| `index.worker.block-ms` | `INDEX_WORKER_BLOCK_MS` | `2000` |
+| `index.worker.poll-interval-ms` | `INDEX_WORKER_POLL_INTERVAL_MS` | `1000` |
+
+### retry strategy
+
+- 3 attempts per message with 250ms / 500ms / 1000ms backoff
+- on success: `XACK` — message removed from PEL
+- on all retries exhausted: **do NOT ACK** — message stays in PEL and is re-delivered on next startup via pending message check
+- app never crashes on indexing failure
+
+### how restarts avoid duplicates
+
+1. **Consumer group + ACK**: each message is only delivered to one consumer at a time
+2. **PEL on failure**: unACKed messages are re-delivered, not lost
+3. **Idempotent operations**: ES upsert and delete are safe to replay — re-processing the same event has no side effects
+
+---
+
+## demo runbook — end-to-end
+
 ```bash
 TOKEN="<your Google ID token>"
 ```
 
-**step 2 — create a plan (publishes UPSERT):**
+**step 1 — create a plan:**
 ```bash
 curl -X POST http://localhost:8080/api/v1/plan \
   -H "Content-Type: application/json" \
@@ -123,71 +117,115 @@ curl -X POST http://localhost:8080/api/v1/plan \
   -d @samples/plan.json
 ```
 
-**step 3 — patch the plan (publishes PATCH):**
+**step 2 — confirm event in stream:**
+```bash
+docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
+```
+
+**step 3 — confirm worker processed it (all ACKed, PEL empty):**
+```bash
+docker exec -it schemaguard-redis redis-cli XPENDING schemaguard:index-events schemaguard-indexers - + 10
+```
+Expected: empty (all messages ACKed)
+
+**step 4 — confirm parent indexed in Elasticsearch:**
+```bash
+curl "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508"
+```
+Expected: `"found": true` with plan document
+
+**step 5 — confirm children indexed (query by parent_id):**
+```bash
+curl -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}'
+```
+Expected: 2 hits (the two linkedPlanServices entries)
+
+**step 6 — patch and verify update in ES:**
 ```bash
 curl -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
   -H "Content-Type: application/merge-patch+json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"planType": "outOfNetwork"}'
+
+# wait ~1s for worker, then:
+curl "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508"
+# planType should be outOfNetwork
 ```
 
-**step 4 — delete the plan (publishes DELETE):**
+**step 7 — delete and verify removed from ES:**
 ```bash
-ETAG=$(curl -s http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H "Authorization: Bearer $TOKEN" -I | grep -i etag | awk '{print $2}' | tr -d '\r')
-
 curl -X DELETE "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "If-Match: $ETAG"
+  -H "Authorization: Bearer $TOKEN"
+
+# wait ~1s, then:
+curl "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508"
+# Expected: "found": false
+
+curl -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}'
+# Expected: 0 hits (children deleted)
 ```
 
-**step 5 — inspect all events:**
+**step 8 — observe worker logs:**
 ```bash
+docker logs schemaguard-app | grep -i indexworker
+```
+
+Expected:
+```
+IndexWorker started (stream=schemaguard:index-events, group=schemaguard-indexers, consumer=indexer-1)
+processing event op=UPSERT id=12xvxc345ssdsds-508 ...
+indexed parent id=12xvxc345ssdsds-508 with 2 children
+processing event op=PATCH id=12xvxc345ssdsds-508 ...
+indexed parent id=12xvxc345ssdsds-508 with 2 children
+processing event op=DELETE id=12xvxc345ssdsds-508 ...
+deleted parent id=12xvxc345ssdsds-508 and its children from index
+```
+
+---
+
+## queueing (Redis Streams) — publisher
+
+Every successful write publishes an event to `schemaguard:index-events`.
+
+| operation | event type | condition |
+|-----------|------------|----------|
+| `POST` | `UPSERT` | 201 only |
+| `PUT` | `UPSERT` | 200 only |
+| `PATCH` | `PATCH` | 200 only |
+| `DELETE` | `DELETE` | 204 only |
+
+```bash
+# inspect stream
 docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
-```
 
-### sample event record (as seen in redis-cli)
+# count events
+docker exec -it schemaguard-redis redis-cli XLEN schemaguard:index-events
 
-```
-1) 1) "1709300400000-0"
-   2)  1) "eventId"
-       2) "a3f29c1d-84e2-4b7a-9f3c-12e456789abc"
-       3) "operation"
-       4) "UPSERT"
-       5) "documentId"
-       6) "12xvxc345ssdsds-508"
-       7) "resourceType"
-       8) "plan"
-       9) "etag"
-      10) "d4e8f2a1b3c9..."
-      11) "timestamp"
-      12) "2026-03-01T14:00:00.123456Z"
+# check pending (unACKed) messages
+docker exec -it schemaguard-redis redis-cli XPENDING schemaguard:index-events schemaguard-indexers - + 10
 ```
 
 ---
 
 ## IndexService abstraction
 
-`IndexService` is the single interface for all Elasticsearch indexing operations.
-Implemented by `ElasticsearchIndexService`. The queue consumer (next task) calls
-these methods after receiving stream events. Controllers never call `IndexService` directly.
-
 | method | description |
 |--------|-------------|
-| `indexParent(parentId, doc, etag, metadata)` | upsert the plan document as a parent |
-| `indexChild(parentId, childId, doc, etag, metadata)` | upsert a child document with `routing=parentId` |
-| `patchParent(parentId, patchedDoc, etag)` | re-index parent with merged document |
-| `deleteParent(parentId)` | delete the parent document by id |
-| `deleteChildren(parentId)` | delete all children via `delete_by_query` |
+| `indexParent` | upsert plan as parent |
+| `indexChild` | upsert child with `routing=parentId` |
+| `patchParent` | re-index parent with patched doc |
+| `deleteParent` | delete parent by id |
+| `deleteChildren` | delete all children via `delete_by_query` |
 
-All operations are idempotent. `deleteChildren` uses `delete_by_query` with `routing=parentId`
-and a `parent_id` filter. See index health: `curl http://localhost:8080/api/v1/index/health`
+All idempotent. Health: `curl http://localhost:8080/api/v1/index/health`
 
 ---
 
 ## Elasticsearch parent-child mapping
-
-The `plans-index` is created automatically on startup:
 
 ```json
 {
@@ -202,16 +240,9 @@ The `plans-index` is created automatically on startup:
 }
 ```
 
-| document type | routing | join field value |
-|--------------|---------|------------------|
-| parent | `objectId` (default) | `"plan"` |
-| child | `parentId` (explicit) | `{"name": "child", "parent": "<parentId>"}` |
-
 ---
 
 ## error contract
-
-Every error response follows this JSON shape:
 
 ```json
 {
@@ -227,11 +258,9 @@ Every error response follows this JSON shape:
 
 ## Google IDP security
 
-SchemaGuard is an **OAuth2 Resource Server** validating Google RS256 ID tokens against
-`https://www.googleapis.com/oauth2/v3/certs`.
+OAuth2 Resource Server — Google RS256 tokens validated against `https://www.googleapis.com/oauth2/v3/certs`.
 
-**public routes:** `/api/v1/schema/**`, `/api/v1/index/**`
-**protected routes:** `/api/v1/plan/**`
+**public:** `/api/v1/schema/**`, `/api/v1/index/**`    **protected:** `/api/v1/plan/**`
 
 ---
 
@@ -241,8 +270,7 @@ SchemaGuard is an **OAuth2 Resource Server** validating Google RS256 ID tokens a
 ./mvnw test
 ```
 
-tests use the `test` profile: `InMemoryKeyValueStore`, `NoOpIndexEventPublisher`,
-no Redis, no Elasticsearch, no Google token required.
+test profile: `InMemoryKeyValueStore`, `NoOpIndexEventPublisher`, no Redis/ES/token needed.
 
 ---
 
@@ -250,12 +278,13 @@ no Redis, no Elasticsearch, no Google token required.
 
 ```
 SchemaGuard/
-├── compose.yaml                                         ← Redis + Elasticsearch + app
+├── compose.yaml                                       ← Redis + Elasticsearch + app
 ├── src/main/java/com/schemaguard/
+│   ├── SchemaGuardApplication.java                  ← @EnableScheduling added
 │   ├── config/
 │   │   ├── AppConfig.java
 │   │   ├── ElasticsearchConfig.java
-│   │   ├── RedisConfig.java                     ← added StringRedisTemplate bean
+│   │   ├── RedisConfig.java
 │   │   └── SecurityConfig.java
 │   ├── elastic/
 │   │   ├── ElasticsearchHealthCheck.java
@@ -264,17 +293,19 @@ SchemaGuard/
 │   │   ├── PlanIndexConstants.java
 │   │   ├── PlanIndexInitializer.java
 │   │   └── PlanRoutingStrategy.java
-│   ├── queue/                                       ← new package
-│   │   ├── IndexEvent.java                      ← event record with toStreamFields()
-│   │   ├── IndexEventOperation.java             ← UPSERT / PATCH / DELETE enum
-│   │   ├── IndexEventPublisher.java             ← interface
-│   │   ├── RedisStreamEventPublisher.java       ← @Profile("redis") XADD impl
-│   │   └── NoOpIndexEventPublisher.java         ← @Profile("test") no-op
+│   ├── queue/
+│   │   ├── IndexEvent.java
+│   │   ├── IndexEventOperation.java
+│   │   ├── IndexEventPublisher.java
+│   │   ├── RedisStreamEventPublisher.java
+│   │   ├── NoOpIndexEventPublisher.java
+│   │   ├── PlanDocumentSplitter.java              ← extracts linkedPlanServices as children
+│   │   └── IndexWorker.java                       ← XREADGROUP consumer, retry, XACK
 │   ├── controller/
 │   │   ├── IndexAdminController.java
-│   │   ├── PlanController.java                  ← publishes events after POST/PUT/PATCH/DELETE
+│   │   ├── PlanController.java
 │   │   └── SchemaController.java
-│   ├── exception/GlobalExceptionHandler.java
+│   ├── exception/
 │   ├── model/
 │   ├── security/
 │   ├── store/
@@ -282,6 +313,6 @@ SchemaGuard/
 │   └── validation/
 ├── src/main/resources/
 │   ├── application.properties
-│   └── application-redis.properties             ← index.events.stream property added
+│   └── application-redis.properties               ← worker config keys added
 └── src/test/resources/application-test.properties
 ```
