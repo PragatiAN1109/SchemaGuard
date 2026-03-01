@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
+import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.stream.*;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -32,7 +33,7 @@ import java.util.Map;
  * 2. For each message, call handleWithRetry().
  * 3. On success: XACK to remove from PEL.
  * 4. On all retries exhausted: do NOT ACK — message stays in PEL.
- *    It will be re-claimed on next startup via XAUTOCLAIM.
+ *    It will be re-claimed on next startup via pending check.
  *
  * Idempotency:
  * - UPSERT/PATCH: IndexService uses ES upsert — safe to replay.
@@ -87,8 +88,7 @@ public class IndexWorker {
     /**
      * Creates the consumer group on startup if it doesn't already exist.
      * BUSYGROUP error means the group was already created — safe to ignore.
-     * Also attempts to reclaim pending messages older than 60s so restarts
-     * don't lose in-flight events.
+     * Also logs any pending (unACKed) messages from previous runs.
      */
     @PostConstruct
     public void initConsumerGroup() {
@@ -111,7 +111,7 @@ public class IndexWorker {
     }
 
     /**
-     * Main polling loop. Runs every POLL_INTERVAL_MS.
+     * Main polling loop. Runs every poll-interval-ms.
      * Reads up to batchSize new messages and processes each one.
      */
     @Scheduled(fixedDelayString = "${index.worker.poll-interval-ms:1000}")
@@ -153,7 +153,6 @@ public class IndexWorker {
         for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
             try {
                 processEvent(operation, documentId, etag);
-                // success — ACK
                 redisTemplate.opsForStream().acknowledge(streamName, groupName, messageId);
                 return;
             } catch (Exception ex) {
@@ -165,26 +164,15 @@ public class IndexWorker {
                 }
             }
         }
-        log.error("retries_exhausted for event op={} id={} msgId={} — leaving in PEL for re-delivery. cause: {}",
+        log.error("retries_exhausted for event op={} id={} msgId={} — leaving in PEL. cause: {}",
                 operation, documentId, messageId,
                 lastEx != null ? lastEx.getMessage() : "unknown");
     }
 
-    /**
-     * Routes the event to the appropriate IndexService method.
-     *
-     * UPSERT / PATCH:
-     *   1. Fetch latest document from KV store.
-     *   2. Index parent + all linkedPlanServices children.
-     *
-     * DELETE:
-     *   1. Delete all children first (delete_by_query).
-     *   2. Delete parent document.
-     */
     private void processEvent(String operation, String documentId, String etag) throws Exception {
         switch (operation) {
             case "UPSERT" -> handleUpsert(documentId, etag);
-            case "PATCH"  -> handleUpsert(documentId, etag); // same logic: re-index with latest doc
+            case "PATCH"  -> handleUpsert(documentId, etag);
             case "DELETE" -> handleDelete(documentId);
             default -> log.warn("unknown operation '{}' for id={} — skipping", operation, documentId);
         }
@@ -196,11 +184,8 @@ public class IndexWorker {
                         "document not found in KV store for id=" + documentId));
 
         JsonNode parentNode = objectMapper.readTree(doc.getJson());
-
-        // index parent
         indexService.indexParent(documentId, parentNode, doc.getEtag(), null);
 
-        // index children (linkedPlanServices entries)
         List<PlanDocumentSplitter.ChildEntry> children = splitter.extractChildren(doc.getJson());
         for (PlanDocumentSplitter.ChildEntry child : children) {
             indexService.indexChild(documentId, child.childId(), child.childDoc(),
@@ -216,17 +201,17 @@ public class IndexWorker {
     }
 
     /**
-     * On startup, attempts to reclaim messages that were delivered to any
-     * consumer but not ACKed within 60 seconds (e.g., due to a crash).
-     * This ensures in-flight messages are not lost on restart.
+     * On startup, checks for any pending (unACKed) messages from previous runs
+     * and logs the count. The next poll() call will re-deliver them automatically
+     * since they remain in the PEL under this consumer group.
      */
     private void reclaimPendingMessages() {
         try {
-            var pendingResult = redisTemplate.opsForStream()
+            List<PendingMessage> pending = redisTemplate.opsForStream()
                     .pending(streamName, groupName, Range.unbounded(), 100);
-            if (pendingResult != null && !pendingResult.isEmpty()) {
+            if (pending != null && !pending.isEmpty()) {
                 log.info("IndexWorker found {} pending messages on startup — will reprocess",
-                        pendingResult.size());
+                        pending.size());
             }
         } catch (Exception ex) {
             log.warn("could not check pending messages — {}", ex.getMessage());
