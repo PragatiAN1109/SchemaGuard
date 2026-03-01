@@ -1,32 +1,117 @@
 # SchemaGuard
 
-A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, and Google OAuth2 JWT security.
+A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch integration, and Google OAuth2 JWT security.
 
-## Overview
+## overview
 
 SchemaGuard is a RESTful web service that provides full CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation, supports conditional GET/PUT/PATCH/DELETE using ETags, implements JSON Merge Patch (RFC 7396), and secures all plan endpoints using Google RS256 Bearer tokens.
 
-## Features
+## features
 
-- JSON Schema Validation for all incoming plan data (POST, PUT, PATCH)
-- Full CRUD: POST, GET, PUT (replace), PATCH (JSON Merge Patch), DELETE
+- JSON Schema validation for all incoming plan data (POST, PUT, PATCH)
+- full CRUD: POST, GET, PUT (replace), PATCH (JSON Merge Patch), DELETE
 - ETag support for conditional requests (SHA-256 based)
 - **Google OAuth2 RS256 JWT security — all `/api/v1/plan/**` endpoints require a valid Bearer token**
-- **Public endpoint: `GET /api/v1/schema/plan` — no auth required**
-- **Standardized error contract — every error returns the same JSON shape**
-- Redis as primary store — data persists across app restarts
+- **public endpoint: `GET /api/v1/schema/plan` — no auth required**
+- **standardized error contract — every error returns the same JSON shape**
+- Redis as primary KV store — data persists across app restarts
+- Elasticsearch — infrastructure wired, indexing coming in next task
 - Docker Compose for one-command demo startup
 
-## Spring Profile → Storage + Security Mapping
+## Spring profile → storage + security mapping
 
 | Profile | Storage Backend | Security |
 |---------|----------------|----------|
 | `redis` (default) | `RedisKeyValueStore` | Google JWT enforced |
-| `test` | `InMemoryKeyValueStore` | Security auto-config excluded |
+| `test` | `InMemoryKeyValueStore` | security auto-config excluded |
 
 ---
 
-## Error Contract
+## starting the full stack
+
+### prerequisites
+- Docker + Docker Compose installed
+- Google Client ID (see Google IDP Security section below)
+
+### start all services
+
+```bash
+export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+docker compose up --build
+```
+
+This starts three services:
+- **Redis** on port `6379`
+- **Elasticsearch** on port `9200`
+- **SchemaGuard app** on port `8080`
+
+The app waits for both Redis and Elasticsearch to pass their health checks before starting.
+
+Look for this in the app logs to confirm everything is up:
+```
+Elasticsearch cluster reachable at elasticsearch:9200 — status: green
+Started SchemaGuardApplication
+```
+
+---
+
+## verifying Elasticsearch
+
+### 1. ping the cluster root endpoint
+
+```bash
+curl http://localhost:9200
+```
+
+Expected response:
+```json
+{
+  "name" : "schemaguard-elasticsearch",
+  "cluster_name" : "docker-cluster",
+  "cluster_uuid" : "<uuid>",
+  "version" : {
+    "number" : "8.13.4",
+    "build_flavor" : "default",
+    "build_type" : "docker",
+    "lucene_version" : "9.10.0",
+    "minimum_wire_compatibility_version" : "7.17.0",
+    "minimum_index_compatibility_version" : "7.0.0"
+  },
+  "tagline" : "You Know, for Search"
+}
+```
+
+### 2. check cluster health
+
+```bash
+curl http://localhost:9200/_cluster/health?pretty
+```
+
+Expected response:
+```json
+{
+  "cluster_name" : "docker-cluster",
+  "status" : "green",
+  "number_of_nodes" : 1,
+  "number_of_data_nodes" : 1,
+  "active_shards" : 0
+}
+```
+
+### 3. confirm app connectivity in logs
+
+```bash
+docker logs schemaguard-app | grep -i elastic
+```
+
+Expected output:
+```
+Elasticsearch cluster reachable at elasticsearch:9200 — status: green
+```
+
+---
+
+## error contract
 
 Every error response — including authentication failures from Spring Security — follows this exact JSON shape:
 
@@ -40,17 +125,17 @@ Every error response — including authentication failures from Spring Security 
 }
 ```
 
-| Field | Type | Description |
+| field | type | description |
 |-------|------|-------------|
-| `timestamp` | ISO-8601 string | When the error occurred |
+| `timestamp` | ISO-8601 string | when the error occurred |
 | `status` | integer | HTTP status code |
 | `error` | string | HTTP reason phrase |
-| `message` | string | Human-readable description |
-| `path` | string | Request URI that caused the error |
+| `message` | string | human-readable description |
+| `path` | string | request URI that caused the error |
 
 No stack traces are ever included in the response body.
 
-### Example 1 — Validation Failure (400)
+### example 1 — validation failure (400)
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/plan \
@@ -64,12 +149,12 @@ curl -X POST http://localhost:8080/api/v1/plan \
   "timestamp": "2026-02-28T15:30:00Z",
   "status": 400,
   "error": "Bad Request",
-  "message": "Schema validation failed — $.planType: is missing but it is required; $.creationDate: is missing but it is required",
+  "message": "schema validation failed — $.planType: is missing but it is required; $.creationDate: is missing but it is required",
   "path": "/api/v1/plan"
 }
 ```
 
-### Example 2 — Unauthorized / No Token (401)
+### example 2 — unauthorized / no token (401)
 
 ```bash
 curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
@@ -80,12 +165,12 @@ curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508
   "timestamp": "2026-02-28T15:30:05Z",
   "status": 401,
   "error": "Unauthorized",
-  "message": "Authentication required: missing or invalid Bearer token",
+  "message": "authentication required: missing or invalid Bearer token",
   "path": "/api/v1/plan/12xvxc345ssdsds-508"
 }
 ```
 
-### Example 3 — Precondition Failed (412)
+### example 3 — precondition failed (412)
 
 ```bash
 curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
@@ -105,330 +190,158 @@ curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
 
 ---
 
-## Task 5 — Google IDP Security
+## Google IDP security
 
-### How It Works
+### how it works
 
 SchemaGuard is configured as an **OAuth2 Resource Server**. Every request to `/api/v1/plan/**` must include a valid `Authorization: Bearer <token>` header. The token is:
 
 1. A Google ID token (RS256-signed JWT)
-2. Validated against Google's public JWK Set: `https://www.googleapis.com/oauth2/v3/certs`
-3. Issuer checked: must be `https://accounts.google.com`
-4. Audience checked: must contain your Google Client ID
+2. validated against Google's public JWK Set: `https://www.googleapis.com/oauth2/v3/certs`
+3. issuer checked: must be `https://accounts.google.com`
+4. audience checked: must contain your Google Client ID
 
 On success, the server logs `sub` and `email` from the token and adds `X-User-Sub` / `X-User-Email` response headers.
 
 ---
 
-## Step 1 — Google Cloud Console Setup
+## step 1 — Google Cloud Console setup
 
-### 1.1 Create a Google Cloud Project
+### 1.1 create a Google Cloud project
 
-1. Go to [https://console.cloud.google.com](https://console.cloud.google.com)
-2. Click the project dropdown → **New Project**
-3. Name it `SchemaGuard-Demo` and click **Create**
+1. go to [https://console.cloud.google.com](https://console.cloud.google.com)
+2. click the project dropdown → **New Project**
+3. name it `SchemaGuard-Demo` and click **Create**
 
-### 1.2 Configure OAuth Consent Screen
+### 1.2 configure OAuth consent screen
 
-1. Navigate to **APIs & Services → OAuth consent screen**
-2. Choose **External** → **Create**
-3. Fill in:
-   - App name: `SchemaGuard`
-   - User support email: your email
-   - Developer contact email: your email
-4. Click **Save and Continue** through the remaining steps
-5. Under **Test users**, add your own Google email address
-6. Click **Back to Dashboard**
+1. navigate to **APIs & Services → OAuth consent screen**
+2. choose **External** → **Create**
+3. fill in:
+   - app name: `SchemaGuard`
+   - user support email: your email
+   - developer contact email: your email
+4. click **Save and Continue** through the remaining steps
+5. under **Test users**, add your own Google email address
+6. click **Back to Dashboard**
 
-### 1.3 Create OAuth 2.0 Client ID
+### 1.3 create OAuth 2.0 client ID
 
-1. Go to **APIs & Services → Credentials**
-2. Click **Create Credentials → OAuth client ID**
-3. Application type: **Web application**
-4. Name: `SchemaGuard Web Client`
-5. Under **Authorized JavaScript origins**, add:
+1. go to **APIs & Services → Credentials**
+2. click **Create Credentials → OAuth client ID**
+3. application type: **Web application**
+4. name: `SchemaGuard Web Client`
+5. under **Authorized JavaScript origins**, add:
    ```
    http://localhost:5500
    http://localhost:8080
    ```
-   *(Add whatever host you'll serve `docs/get-token.html` from)*
-6. Click **Create**
-7. **Copy the Client ID** — it looks like: `123456789-abc123.apps.googleusercontent.com`
+6. click **Create**
+7. **copy the Client ID** — it looks like: `123456789-abc123.apps.googleusercontent.com`
 
 ---
 
-## Step 2 — Obtain a Google ID Token (Demo)
+## step 2 — obtain a Google ID token (demo)
 
-### Option A — HTML Token Page (Recommended)
+### option A — HTML token page (recommended)
 
-A ready-made token page is included at `docs/get-token.html`.
+a ready-made token page is included at `docs/get-token.html`.
 
-**Setup:**
-1. Open `docs/get-token.html` in a text editor
-2. Replace `YOUR_GOOGLE_CLIENT_ID` with your actual Client ID
-3. Serve it locally (any static server works):
+1. open `docs/get-token.html` in a text editor
+2. replace `YOUR_GOOGLE_CLIENT_ID` with your actual client ID
+3. serve it locally:
 
 ```bash
-# Option 1: Python
+# Python
 cd docs && python3 -m http.server 5500
 
-# Option 2: Node npx
+# Node
 cd docs && npx serve -p 5500
-
-# Option 3: VS Code Live Server extension — just open get-token.html
 ```
 
-4. Open `http://localhost:5500/get-token.html` in a browser
-5. Click **Sign in with Google**
-6. **Copy the token** from the text box — this is your Bearer token
+4. open `http://localhost:5500/get-token.html` in a browser
+5. click **Sign in with Google**
+6. copy the token from the text box
 
-The page also displays the decoded `sub` and `email` from the token so you can verify it worked.
+### option B — OAuth Playground
 
-### Option B — curl with OAuth Playground
-
-1. Go to [https://developers.google.com/oauthplayground](https://developers.google.com/oauthplayground)
-2. Click the settings gear (⚙) → check **Use your own OAuth credentials**
-3. Enter your Client ID and Client Secret
-4. In Step 1, find **Google OAuth2 API v2** → select `openid`, `email`
-5. Click **Authorize APIs** → sign in
-6. In Step 2, click **Exchange authorization code for tokens**
-7. Copy the `id_token` value from the response
+1. go to [https://developers.google.com/oauthplayground](https://developers.google.com/oauthplayground)
+2. click settings gear → check **Use your own OAuth credentials**
+3. select `openid`, `email` → authorize → exchange for tokens
+4. copy the `id_token` value
 
 ---
 
-## Step 3 — Start the Application
-
-### Local run (Redis must be running):
-
-```bash
-export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
-./mvnw spring-boot:run
-```
-
-### Docker Compose:
-
-```bash
-export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
-docker compose up --build
-```
-
----
-
-## Step 4 — Demo the Security (Copy-Paste Commands)
-
-> Replace `<TOKEN>` with the token you obtained in Step 2.
-> Replace `<YOUR_CLIENT_ID>` with your actual Google Client ID.
-
-### 4.1 — Unauthenticated request → 401
-
-```bash
-curl http://localhost:8080/api/v1/plan/some-id -v
-```
-
-**Expected response:**
-```json
-{
-  "timestamp": "2026-02-28T15:30:05Z",
-  "status": 401,
-  "error": "Unauthorized",
-  "message": "Authentication required: missing or invalid Bearer token",
-  "path": "/api/v1/plan/some-id"
-}
-```
-
-### 4.2 — Invalid/fake token → 401
-
-```bash
-curl http://localhost:8080/api/v1/plan/some-id \
-  -H "Authorization: Bearer this.is.not.a.valid.token" -v
-```
-
-**Expected:** `401 Unauthorized` — signature validation fails against Google's public keys.
-
-### 4.3 — Schema endpoint is public — no token needed
-
-```bash
-curl http://localhost:8080/api/v1/schema/plan
-```
-
-**Expected:** `200 OK` with full JSON Schema — no `Authorization` header required.
-
-### 4.4 — Valid Google token → 200 (POST a plan)
-
-```bash
-TOKEN="<paste your Google ID token here>"
-
-curl -X POST http://localhost:8080/api/v1/plan \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d @samples/plan.json -v
-```
-
-**Expected:** `201 Created` with `ETag` + `Location` headers.
-
-### 4.5 — GET plan with valid token
-
-```bash
-curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H "Authorization: Bearer $TOKEN" -v
-```
-
-**Expected:** `200 OK` with plan body.
-
-### 4.6 — DELETE plan with valid token + If-Match
-
-```bash
-curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'If-Match: "<etag-value>"' -v
-```
-
-**Expected:** `204 No Content`
-
----
-
-## Step 5 — Verify RS256 Using jwt.io
-
-1. Copy your Google ID token
-2. Go to [https://jwt.io](https://jwt.io)
-3. Paste the token into the **Encoded** box on the left
-4. In the **Header** section (top right), you'll see:
-   ```json
-   {
-     "alg": "RS256",
-     "kid": "...",
-     "typ": "JWT"
-   }
-   ```
-5. The **Payload** section shows your claims:
-   ```json
-   {
-     "iss": "https://accounts.google.com",
-     "aud": "<your-client-id>.apps.googleusercontent.com",
-     "sub": "1234567890",
-     "email": "you@gmail.com",
-     ...
-   }
-   ```
-
-The API validates the signature using Google's public keys fetched from:
-`https://www.googleapis.com/oauth2/v3/certs`
-
----
-
-## Security Architecture
-
-```
-Request → Spring Security filter chain
-           ↓
-       Authorization: Bearer <token> present?
-           ↓ yes
-       Fetch Google public keys (JWK Set URI)
-           ↓
-       Verify RS256 signature
-           ↓
-       Validate issuer = https://accounts.google.com
-           ↓
-       Validate audience contains GOOGLE_CLIENT_ID
-           ↓
-       JwtClaimsLogger: log sub + email, set X-User-Sub/X-User-Email headers
-           ↓
-       Route to controller
-```
-
-**Public routes (no auth):**
-- `GET /api/v1/schema/**`
-
-**Protected routes (Bearer token required):**
-- `GET /api/v1/plan/**`
-- `POST /api/v1/plan`
-- `PUT /api/v1/plan/**`
-- `PATCH /api/v1/plan/**`
-- `DELETE /api/v1/plan/**`
-
----
-
-## Demo Runbook — Docker Compose
-
-### Prerequisites
-- Docker + Docker Compose installed
-- Google Client ID from Step 1
-
-```bash
-export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
-docker compose up --build
-```
-
-Wait for `Started SchemaGuardApplication` in the logs.
-
-### Verify Redis + Security together
+## step 3 — demo the API
 
 ```bash
 TOKEN="<your Google ID token>"
 
-# 1. Create a plan (authenticated)
+# create a plan
 curl -X POST http://localhost:8080/api/v1/plan \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d @samples/plan.json
 
-# 2. Verify it's in Redis
-docker exec -it schemaguard-redis redis-cli KEYS "plan:*"
-
-# 3. Restart app — data persists, auth still works
-docker compose restart app
+# get a plan
 curl http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Authorization: Bearer $TOKEN"
-# Expected: 200 OK
+
+# delete a plan
+curl -X DELETE http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'If-Match: "<etag-value>"'
 ```
 
 ---
 
-## Running Tests
+## running tests
 
 ```bash
 ./mvnw test
 ```
 
-Tests use the `test` profile which uses `InMemoryKeyValueStore`. No Redis and no Google token required.
+tests use the `test` profile: `InMemoryKeyValueStore`, no Redis, no Elasticsearch, no Google token required.
 
 ---
 
 ## JSON Schema
 
-Schema file location:
 ```
 src/main/resources/schemas/plan-schema.json
 ```
 
-Retrieve at runtime (public endpoint — no auth needed):
 ```bash
+# retrieve at runtime (public endpoint — no auth needed)
 curl http://localhost:8080/api/v1/schema/plan
 ```
 
 ---
 
-## Architecture
+## architecture
 
 ```
 SchemaGuard/
-├── compose.yaml
+├── compose.yaml                                     ← Redis + Elasticsearch + app
 ├── Dockerfile
 ├── docs/
 │   └── get-token.html
 ├── src/main/java/com/schemaguard/
 │   ├── config/
 │   │   ├── AppConfig.java
+│   │   ├── ElasticsearchConfig.java         ← RestClient + ElasticsearchClient beans
 │   │   ├── RedisConfig.java
-│   │   └── SecurityConfig.java          ← OAuth2 Resource Server + SecurityErrorHandler wired
+│   │   └── SecurityConfig.java
+│   ├── elastic/
+│   │   └── ElasticsearchHealthCheck.java    ← startup cluster ping via ApplicationReadyEvent
 │   ├── security/
 │   │   ├── JwtClaimsLogger.java
-│   │   └── SecurityErrorHandler.java    ← AuthenticationEntryPoint + AccessDeniedHandler
+│   │   └── SecurityErrorHandler.java
 │   ├── controller/
 │   ├── exception/
-│   │   └── GlobalExceptionHandler.java  ← All exceptions → ApiError JSON
+│   │   └── GlobalExceptionHandler.java
 │   ├── model/
-│   │   ├── ApiError.java                ← Canonical error shape
+│   │   ├── ApiError.java
 │   │   └── StoredDocument.java
 │   ├── store/
 │   ├── util/
@@ -436,7 +349,7 @@ SchemaGuard/
 ├── src/main/resources/
 │   ├── schemas/plan-schema.json
 │   ├── application.properties
-│   └── application-redis.properties
+│   └── application-redis.properties       ← elastic.host / elastic.port added
 └── src/test/resources/
     └── application-test.properties
 ```

@@ -15,6 +15,27 @@ services:
       timeout: 3s
       retries: 5
 
+  elasticsearch:
+    image: elasticsearch:8.13.4
+    container_name: schemaguard-elasticsearch
+    environment:
+      # Single-node cluster — no inter-node discovery needed
+      - discovery.type=single-node
+      # Disable TLS/auth for local demo — never use in production
+      - xpack.security.enabled=false
+      # Heap size — keep small for local demo
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
   app:
     build:
       context: .
@@ -23,19 +44,26 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Tells the app to connect to the 'redis' service by container name
+      # Redis connection
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # Elasticsearch connection
+      - ELASTIC_HOST=elasticsearch
+      - ELASTIC_PORT=9200
       # Activates the redis Spring profile (RedisKeyValueStore + RedisConfig + security)
       - SPRING_PROFILES_ACTIVE=redis
       # Google OAuth2 Client ID for JWT audience validation.
-      # Set this before running: export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+      # Set before running: export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
     depends_on:
       redis:
+        condition: service_healthy
+      elasticsearch:
         condition: service_healthy
     restart: on-failure
 
 volumes:
   redis-data:
+    driver: local
+  es-data:
     driver: local
