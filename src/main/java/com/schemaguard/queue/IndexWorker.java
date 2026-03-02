@@ -206,10 +206,28 @@ public class IndexWorker {
         log.info("PATCH re-index complete id={} children={}", documentId, children.size());
     }
 
+    /**
+     * Handles a DELETE event by cascading removal through Elasticsearch.
+     *
+     * Order is deliberate — children MUST be deleted before the parent because
+     * Elasticsearch's parent-child join requires the parent to exist when querying
+     * children via parent_id. Deleting children first also avoids orphaned child
+     * documents that would be unreachable after the parent is gone.
+     *
+     * Both operations are idempotent: re-processing the same DELETE event
+     * (after a worker crash + PEL re-claim) produces no errors.
+     */
     private void handleDelete(String documentId) {
+        log.info("Processing DELETE event id={}", documentId);
+
+        // Step 1: delete all child documents for this parent first.
+        // Uses delete_by_query with routing=parentId + parent_id term query.
         indexService.deleteChildren(documentId);
+        log.info("Deleted children for parent id={}", documentId);
+
+        // Step 2: delete the parent document. Graceful if already absent.
         indexService.deleteParent(documentId);
-        log.info("deleted parent id={} and its children from index", documentId);
+        log.info("Deleted parent id={}", documentId);
     }
 
     /**
