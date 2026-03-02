@@ -13,6 +13,8 @@ import com.schemaguard.store.KeyValueStore;
 import com.schemaguard.util.JsonUtil;
 import com.schemaguard.validation.SchemaValidationException;
 import com.schemaguard.validation.SchemaValidator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -25,6 +27,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/v1/plan")
 public class PlanController {
+
+    private static final Logger log = LoggerFactory.getLogger(PlanController.class);
 
     static final String MERGE_PATCH_CONTENT_TYPE = "application/merge-patch+json";
 
@@ -184,8 +188,12 @@ public class PlanController {
 
         StoredDocument updated = store.get(objectId).orElseThrow();
 
-        // publish PATCH event after successful merge-patch
-        eventPublisher.publish(IndexEvent.of(IndexEventOperation.PATCH, objectId, updated.getEtag()));
+        // Publish PATCH event only after KV update succeeds — carries the NEW etag.
+        // Never published on 400 / 404 / 412 paths.
+        IndexEvent patchEvent = IndexEvent.of(IndexEventOperation.PATCH, objectId, updated.getEtag());
+        eventPublisher.publish(patchEvent);
+        log.info("PATCH applied to KV id={} newEtag={}; published PATCH event",
+                objectId, updated.getEtag());
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)

@@ -142,16 +142,55 @@ curl -X GET "http://localhost:9200/plans-index/_search" \
 ```
 Expected: 2 hits (the two linkedPlanServices entries)
 
-**step 6 — patch and verify update in ES:**
+**step 6 — end-to-end PATCH propagation demo (KV → Queue → Elastic):**
+
+> Index: `plans-index` · Stream: `schemaguard:index-events` · Join field: `my_join_field`
+
+**6a — query Elastic BEFORE the patch (baseline):**
+```bash
+curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
+  | python3 -m json.tool | grep planType
+# Expected: "planType": "inNetwork"
+```
+
+**6b — send the PATCH request (JSON Merge Patch — RFC 7396):**
 ```bash
 curl -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
   -H "Content-Type: application/merge-patch+json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"planType": "outOfNetwork"}'
+```
+Expected: `200 OK` with updated JSON body and new `ETag` header.
 
-# wait ~1s for worker, then:
-curl "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508"
-# planType should be outOfNetwork
+App log (visible via `docker logs schemaguard-app`):
+```
+PATCH applied to KV id=12xvxc345ssdsds-508 newEtag=<new-sha256>; published PATCH event
+Processing PATCH event id=12xvxc345ssdsds-508 etag=<new-sha256>
+Fetched latest KV doc id=12xvxc345ssdsds-508; re-indexed into Elastic
+PATCH re-index complete id=12xvxc345ssdsds-508 children=2
+```
+
+**6c — confirm PATCH event in the Redis Stream:**
+```bash
+docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
+```
+Look for an entry with `operation=PATCH` and `documentId=12xvxc345ssdsds-508`.
+
+**6d — query Elastic AFTER the patch (wait ~1 s for worker):**
+```bash
+sleep 1
+curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
+  | python3 -m json.tool | grep planType
+# Expected: "planType": "outOfNetwork"
+```
+
+**6e — term search to confirm the updated value is queryable:**
+```bash
+curl -s -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"term":{"planType":"outOfNetwork"}}}' \
+  | python3 -m json.tool | grep -E '"planType"|"objectId"'
+# Expected: 1 hit — objectId=12xvxc345ssdsds-508, planType=outOfNetwork
 ```
 
 **step 7 — delete and verify removed from ES:**
@@ -177,13 +216,57 @@ docker logs schemaguard-app | grep -i indexworker
 Expected:
 ```
 IndexWorker started (stream=schemaguard:index-events, group=schemaguard-indexers, consumer=indexer-1)
-processing event op=UPSERT id=12xvxc345ssdsds-508 ...
+processing event op=UPSERT id=12xvxc345ssdsds-508 etag=<sha256> msgId=...
 indexed parent id=12xvxc345ssdsds-508 with 2 children
-processing event op=PATCH id=12xvxc345ssdsds-508 ...
-indexed parent id=12xvxc345ssdsds-508 with 2 children
-processing event op=DELETE id=12xvxc345ssdsds-508 ...
+Processing PATCH event id=12xvxc345ssdsds-508 etag=<new-sha256>
+Fetched latest KV doc id=12xvxc345ssdsds-508; re-indexed into Elastic
+PATCH re-index complete id=12xvxc345ssdsds-508 children=2
+processing event op=DELETE id=12xvxc345ssdsds-508 etag=<sha256> msgId=...
 deleted parent id=12xvxc345ssdsds-508 and its children from index
 ```
+
+---
+
+## PATCH propagation — KV → Queue → Elastic
+
+### 10-step flow
+
+```
+PATCH /api/v1/plan/{objectId}
+  1.  Validate If-Match ETag              → 412 if stale
+  2.  Apply JSON Merge Patch (RFC 7396)   → merged document
+  3.  Validate merged doc (JSON Schema)   → 400 if invalid
+  4.  Write merged doc to KV (Redis)      → new ETag generated
+  5.  Publish PATCH event to Redis Stream
+      fields: operation=PATCH, documentId, etag=<NEW etag>, timestamp
+      (fire-and-forget — API response is NOT blocked by stream write)
+  6.  Return 200 with updated body + ETag header
+      ↓ ~1 s later
+  7.  IndexWorker reads PATCH event via XREADGROUP
+  8.  Fetches authoritative document from KV store (not from Elastic)
+  9.  Calls IndexService.indexParent() → Elasticsearch upsert by id
+  10. Re-indexes all linkedPlanServices children; XACK message
+```
+
+### Why re-fetch from KV rather than patch Elastic directly
+
+| Reason | Detail |
+|--------|--------|
+| **No divergence** | Elastic can never hold a value not committed to KV. If KV write failed, no event is published — Elastic is never touched. |
+| **Idempotency** | Re-processing the same event (worker crash + PEL re-claim) always indexes the current KV state — no duplicate or conflicting writes. |
+| **No patch logic in worker** | Worker does not need to understand JSON Merge Patch semantics; it simply indexes whatever is in KV. |
+| **Safe under rapid PATCHes** | If two events are processed out of order, the last one always indexes the most recent committed KV state regardless of which ETag it carried. |
+
+### Key constants
+
+| Name | Value |
+|------|-------|
+| Redis Stream | `schemaguard:index-events` |
+| Consumer group | `schemaguard-indexers` |
+| Elasticsearch index | `plans-index` |
+| Join field | `my_join_field` |
+| Parent join value | `"plan"` (plain string) |
+| Child join value | `{"name":"child","parent":"<parentId>"}` |
 
 ---
 
