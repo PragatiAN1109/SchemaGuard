@@ -222,8 +222,12 @@ public class PlanController {
 
         store.delete(objectId);
 
-        // publish DELETE event after successful deletion
-        eventPublisher.publish(IndexEvent.of(IndexEventOperation.DELETE, objectId, etagBeforeDelete));
+        // Publish DELETE event only after KV delete succeeds — etag captured before deletion.
+        // Never published on 404 / 412 error paths.
+        IndexEvent deleteEvent = IndexEvent.of(IndexEventOperation.DELETE, objectId, etagBeforeDelete);
+        eventPublisher.publish(deleteEvent);
+        log.info("DELETE removed from KV id={}; published DELETE event for cascaded Elastic removal",
+                objectId);
 
         return ResponseEntity.noContent().build();
     }
