@@ -193,19 +193,83 @@ curl -s -X GET "http://localhost:9200/plans-index/_search" \
 # Expected: 1 hit — objectId=12xvxc345ssdsds-508, planType=outOfNetwork
 ```
 
-**step 7 — delete and verify removed from ES:**
+**step 7 — cascaded delete demo (KV + Elastic parent + Elastic children):**
+
+> Index: `plans-index` · Stream: `schemaguard:index-events` · Join field: `my_join_field`
+
+**7a — verify parent exists in Elastic BEFORE delete:**
 ```bash
-curl -X DELETE "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Authorization: Bearer $TOKEN"
+curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
+  | python3 -m json.tool | grep -E '"found"|"objectId"'
+# Expected: "found": true
+```
 
-# wait ~1s, then:
-curl "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508"
-# Expected: "found": false
-
-curl -X GET "http://localhost:9200/plans-index/_search" \
+**7b — verify children exist BEFORE delete:**
+```bash
+curl -s -X GET "http://localhost:9200/plans-index/_search" \
   -H "Content-Type: application/json" \
-  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}'
-# Expected: 0 hits (children deleted)
+  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}' \
+  | python3 -m json.tool | grep -E '"total"|"value"'
+# Expected: "value": 2  (the two linkedPlanServices entries)
+```
+
+**7c — verify KV has the document BEFORE delete:**
+```bash
+curl -s "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool | grep objectId
+# Expected: "objectId": "12xvxc345ssdsds-508"
+```
+
+**7d — send the DELETE request:**
+```bash
+curl -s -o /dev/null -w "%{http_code}" \
+  -X DELETE "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Authorization: Bearer $TOKEN"
+# Expected: 204
+```
+
+App log (visible via `docker logs schemaguard-app`):
+```
+DELETE removed from KV id=12xvxc345ssdsds-508; published DELETE event for cascaded Elastic removal
+Processing DELETE event id=12xvxc345ssdsds-508
+Deleted children for parent id=12xvxc345ssdsds-508
+Deleted parent id=12xvxc345ssdsds-508
+```
+
+**7e — confirm DELETE event in the Redis Stream:**
+```bash
+docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
+```
+Look for an entry with `operation=DELETE` and `documentId=12xvxc345ssdsds-508`.
+
+**7f — verify KV returns 404 AFTER delete (wait ~1 s):**
+```bash
+sleep 1
+curl -s "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool | grep -E '"status"|"error"'
+# Expected: "status": 404, "error": "Not Found"
+```
+
+**7g — verify parent is gone from Elastic:**
+```bash
+curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
+  | python3 -m json.tool | grep '"found"'
+# Expected: "found": false
+```
+
+**7h — verify all children are gone from Elastic:**
+```bash
+curl -s -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}' \
+  | python3 -m json.tool | grep -E '"total"|"value"'
+# Expected: "value": 0  — all children cascaded-deleted
+```
+
+**7i — confirm no stuck messages in PEL:**
+```bash
+docker exec -it schemaguard-redis redis-cli XPENDING schemaguard:index-events schemaguard-indexers - + 10
+# Expected: empty list
 ```
 
 **step 8 — observe worker logs:**
@@ -222,7 +286,9 @@ Processing PATCH event id=12xvxc345ssdsds-508 etag=<new-sha256>
 Fetched latest KV doc id=12xvxc345ssdsds-508; re-indexed into Elastic
 PATCH re-index complete id=12xvxc345ssdsds-508 children=2
 processing event op=DELETE id=12xvxc345ssdsds-508 etag=<sha256> msgId=...
-deleted parent id=12xvxc345ssdsds-508 and its children from index
+Processing DELETE event id=12xvxc345ssdsds-508
+Deleted children for parent id=12xvxc345ssdsds-508
+Deleted parent id=12xvxc345ssdsds-508
 ```
 
 ---
@@ -267,6 +333,78 @@ PATCH /api/v1/plan/{objectId}
 | Join field | `my_join_field` |
 | Parent join value | `"plan"` (plain string) |
 | Child join value | `{"name":"child","parent":"<parentId>"}` |
+
+---
+
+## Cascaded delete — KV + Elastic parent + Elastic children
+
+### Flow
+
+```
+DELETE /api/v1/plan/{objectId}
+  1.  Fetch document from KV store         → 404 if not found
+  2.  Validate If-Match ETag (if provided) → 412 if stale
+  3.  Capture etag before deletion
+  4.  Delete document from KV store (Redis)
+  5.  Publish DELETE event to Redis Stream
+      fields: operation=DELETE, documentId, etag=<last-known etag>, timestamp
+      (fire-and-forget — 204 response is NOT blocked by stream write)
+  6.  Return 204 No Content
+      ↓ ~1 s later
+  7.  IndexWorker reads DELETE event via XREADGROUP
+  8.  Calls IndexService.deleteChildren(parentId)
+      → delete_by_query with routing=parentId + parent_id term filter
+      → removes ALL child documents for this parent in one query
+      → idempotent: no children = no error
+  9.  Calls IndexService.deleteParent(parentId)
+      → DELETE /<index>/_doc/<parentId>
+      → 404 from Elastic handled gracefully (already absent = success)
+  10. XACK — message removed from PEL
+```
+
+### Why children must be deleted before the parent
+
+In Elasticsearch's parent-child join model, child documents are co-located with their
+parent on the same shard via `routing=parentId`. Deleting children first ensures:
+
+1. **No orphaned children** — once the parent is gone, children cannot be reached via
+   `parent_id` queries and would silently consume index space forever.
+2. **Correct shard targeting** — `delete_by_query` uses `routing=parentId` to target
+   only the shard where children live. This routing value is available from the event,
+   before the parent document is removed from Elastic.
+3. **Idempotency** — if the worker crashes between step 8 and 9, re-processing the
+   event will attempt `deleteChildren` again (no-op, already gone) then `deleteParent`
+   again (404 from Elastic, handled gracefully). No errors, no duplicates.
+
+### deleteChildren implementation
+
+```
+POST /plans-index/_delete_by_query?routing=<parentId>&refresh=true
+{
+  "query": {
+    "parent_id": {
+      "type": "child",
+      "id": "<parentId>"
+    }
+  }
+}
+```
+
+- `routing=parentId` — targets only the shard where children are stored
+- `parent_id` query — matches only child documents belonging to this parent
+- `refresh=true` — ensures the deletion is visible to subsequent searches immediately
+- Returns `{ "deleted": N }` — N=0 if no children exist (not an error)
+
+### Key constants
+
+| Name | Value |
+|------|-------|
+| Redis Stream | `schemaguard:index-events` |
+| Consumer group | `schemaguard-indexers` |
+| Elasticsearch index | `plans-index` |
+| Join field | `my_join_field` |
+| Child type name | `child` |
+| Parent type name | `plan` |
 
 ---
 
