@@ -408,6 +408,159 @@ POST /plans-index/_delete_by_query?routing=<parentId>&refresh=true
 
 ---
 
+## Search API — parent-child Elasticsearch queries
+
+Search endpoints expose Elasticsearch parent-child join queries as REST APIs.
+All endpoints require a valid Google Bearer token (same as `/api/v1/plan/**`).
+
+> **Indexing is asynchronous.** Documents are indexed by `IndexWorker` after the API
+> writes to Redis — search results may lag behind the KV store by ~1 s after a write.
+> Always allow the worker to process events before running search queries.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/search` | Search parent plans, optionally filtered by child properties |
+| `GET` | `/api/v1/search/parent/{id}/children` | Return all children for a given parent |
+
+---
+
+### GET /api/v1/search — search parents via has_child
+
+**Query params (all optional):**
+
+| Param | Description |
+|-------|-------------|
+| `childField` | Field name on a child document to filter by |
+| `childValue` | Value to match on `childField` (term + match) |
+| `q` | Free-text search applied to the parent document itself |
+
+`childField` and `childValue` must be provided together or both omitted.
+
+**Example — find parents that have a child with `name = "Yearly physical"`:**
+```bash
+curl -s "http://localhost:8080/api/v1/search?childField=name&childValue=Yearly%20physical" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+**Example — list all indexed parents (no filter):**
+```bash
+curl -s "http://localhost:8080/api/v1/search" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+**Example — combine parent text search + child filter:**
+```bash
+curl -s "http://localhost:8080/api/v1/search?q=inNetwork&childField=objectType&childValue=planservice" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+**Response shape:**
+```json
+{
+  "count": 1,
+  "results": [
+    {
+      "parentId": "12xvxc345ssdsds-508",
+      "score": 1.0,
+      "source": { "objectId": "...", "planType": "inNetwork", ... },
+      "matchedBy": {
+        "childField": "name",
+        "childValue": "Yearly physical"
+      }
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/v1/search/parent/{id}/children — list children via has_parent
+
+Returns all child documents (linkedPlanServices entries) belonging to the given parent.
+Returns `count: 0` with an empty array if the parent has no children — not a 404.
+
+```bash
+curl -s "http://localhost:8080/api/v1/search/parent/12xvxc345ssdsds-508/children" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+**Response shape:**
+```json
+{
+  "parentId": "12xvxc345ssdsds-508",
+  "count": 2,
+  "children": [
+    {
+      "childId": "27283xvx9asdff-504",
+      "source": { "objectId": "27283xvx9asdff-504", "objectType": "planservice", ... }
+    },
+    {
+      "childId": "27283xvx9sdf-507",
+      "source": { "objectId": "27283xvx9sdf-507", "objectType": "planservice", ... }
+    }
+  ]
+}
+```
+
+---
+
+### Direct Elasticsearch equivalents (for demo/debugging)
+
+**has_child query — parents with a child matching a field:**
+```bash
+curl -s -X GET "http://localhost:9200/plans-index/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "has_child": {
+        "type": "child",
+        "query": { "match": { "name": "Yearly physical" } }
+      }
+    }
+  }' | python3 -m json.tool
+```
+
+**has_parent query — children for a specific parent (with routing):**
+```bash
+curl -s -X GET "http://localhost:9200/plans-index/_search?routing=12xvxc345ssdsds-508" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "has_parent": {
+        "parent_type": "plan",
+        "query": { "term": { "objectId": "12xvxc345ssdsds-508" } }
+      }
+    }
+  }' | python3 -m json.tool
+```
+
+**parent_id query — direct child lookup (most efficient, use routing):**
+```bash
+curl -s -X GET "http://localhost:9200/plans-index/_search?routing=12xvxc345ssdsds-508" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "parent_id": { "type": "child", "id": "12xvxc345ssdsds-508" }
+    }
+  }' | python3 -m json.tool
+```
+
+---
+
+### Routing and join field notes
+
+| Concept | Detail |
+|---------|--------|
+| Join field name | `my_join_field` |
+| Parent relation | `plan` (plain string value) |
+| Child relation | `child` (object: `{"name":"child","parent":"<parentId>"}`) |
+| Child routing | `routing=parentId` — **required** so child queries hit the correct shard |
+| Why routing matters | Child docs are co-located with their parent on the same shard. Without `routing=parentId`, the query scatters to all shards and may miss documents. |
+
+---
+
 ## queueing (Redis Streams) — publisher
 
 Every successful write publishes an event to `schemaguard:index-events`.
