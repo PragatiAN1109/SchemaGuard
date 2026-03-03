@@ -137,6 +137,7 @@ public class PlanController {
 
         // publish UPSERT event after successful full replace
         eventPublisher.publish(IndexEvent.of(IndexEventOperation.UPSERT, objectId, updated.getEtag()));
+        log.info("KV updated id={} newEtag={}; published event", objectId, updated.getEtag());
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("objectId", objectId);
@@ -192,8 +193,7 @@ public class PlanController {
         // Never published on 400 / 404 / 412 paths.
         IndexEvent patchEvent = IndexEvent.of(IndexEventOperation.PATCH, objectId, updated.getEtag());
         eventPublisher.publish(patchEvent);
-        log.info("PATCH applied to KV id={} newEtag={}; published PATCH event",
-                objectId, updated.getEtag());
+        log.info("KV updated id={} newEtag={}; published event", objectId, updated.getEtag());
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
