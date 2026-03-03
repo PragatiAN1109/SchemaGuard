@@ -293,6 +293,134 @@ Deleted parent id=12xvxc345ssdsds-508
 
 ---
 
+## Async consistency model — If-Match and ETag version safety
+
+### Why this matters
+
+Indexing into Elasticsearch happens **asynchronously** via Redis Streams. Between
+the API returning a `200` and the worker processing the event, another write may
+arrive and produce a newer version. Without a version check, the worker could
+index a stale snapshot and overwrite the correct, newer Elastic state.
+
+### How it works
+
+```
+Client                  API (KV + Redis)            IndexWorker         Elasticsearch
+  │                          │                           │                    │
+  ├─ PATCH v1 ──────────────►│ If-Match: etag_v0         │                    │
+  │                          │ ETag check passes          │                    │
+  │                          │ KV → etag_v1               │                    │
+  │                          │ publish event(etag=v1) ───►│                    │
+  │◄─ 200 etag_v1 ───────────│                           │                    │
+  │                          │                           │                    │
+  ├─ PATCH v2 ──────────────►│ If-Match: etag_v1         │                    │
+  │                          │ ETag check passes          │                    │
+  │                          │ KV → etag_v2               │                    │
+  │                          │ publish event(etag=v2) ───►│                    │
+  │◄─ 200 etag_v2 ───────────│                           │                    │
+  │                          │                           │                    │
+  │                          │          event(etag=v1) ──►│                    │
+  │                          │          fetch KV → etag_v2│                    │
+  │                          │          v1 ≠ v2 → SKIP   │                    │
+  │                          │                           │                    │
+  │                          │          event(etag=v2) ──►│                    │
+  │                          │          fetch KV → etag_v2│                    │
+  │                          │          v2 = v2 → INDEX ─►│── index v2 ───────►│
+```
+
+### Rules
+
+| Layer | Behaviour |
+|-------|-----------|
+| **API (PUT / PATCH)** | Validates `If-Match` header against current KV etag → `412` if stale. Event published only after successful KV write. |
+| **Event payload** | Always carries the **new** etag produced by the KV write. |
+| **Worker (UPSERT / PATCH)** | Fetches current KV etag; if `event.etag ≠ currentKV.etag` → logs stale skip, ACKs event, does NOT index. |
+| **Worker (DELETE)** | No version check — delete is idempotent; absent doc in Elastic is silently fine. |
+| **Elasticsearch** | Only ever receives the latest committed KV state. Can never hold a value that is older than what KV currently stores. |
+
+### Worker stale-detection log lines
+
+```
+# Stale event skipped:
+Skipping stale event for id=<id> eventEtag=<old> currentEtag=<new>
+
+# Fresh event indexed:
+Processing event id=<id> eventEtag=<etag>
+Index updated for id=<id> children=<n>
+```
+
+---
+
+### Demo — stale event detection
+
+**Prerequisites:** stack running, plan created and indexed.
+
+**1 — Get current etag:**
+```bash
+ETAG=$(curl -si "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Authorization: Bearer $TOKEN" | grep -i ^etag | awk '{print $2}' | tr -d '"\r')
+echo "ETag: $ETAG"
+```
+
+**2 — Apply first PATCH (v1):**
+```bash
+ETAG_V1=$(curl -s -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Content-Type: application/merge-patch+json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "If-Match: \"$ETAG\"" \
+  -d '{"planType": "outOfNetwork"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('_etag','') or '')" 2>/dev/null)
+# Capture new ETag from response header instead:
+ETAG_V1=$(curl -si -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Content-Type: application/merge-patch+json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "If-Match: \"$ETAG\"" \
+  -d '{"planType": "outOfNetwork"}' | grep -i ^etag | awk '{print $2}' | tr -d '"\r')
+echo "ETag v1: $ETAG_V1"
+```
+
+**3 — Apply second PATCH immediately (v2):**
+```bash
+curl -s -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Content-Type: application/merge-patch+json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "If-Match: \"$ETAG_V1\"" \
+  -d '{"planType": "inNetwork"}' | python3 -m json.tool | grep planType
+# Expected: planType = inNetwork (latest)
+```
+
+**4 — Check worker logs to see stale skip:**
+```bash
+docker logs schemaguard-app 2>&1 | grep -E "Skipping stale|Processing event|Index updated" | tail -10
+```
+
+Expected output (v1 event arrives after v2 already written):
+```
+Processing event id=12xvxc345ssdsds-508 eventEtag=<etag_v2>
+Index updated for id=12xvxc345ssdsds-508 children=2
+Skipping stale event for id=12xvxc345ssdsds-508 eventEtag=<etag_v1> currentEtag=<etag_v2>
+```
+*(order depends on worker poll timing; both events will appear)*
+
+**5 — Verify Elastic holds latest state only:**
+```bash
+sleep 1
+curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
+  | python3 -m json.tool | grep planType
+# Expected: "planType": "inNetwork"  — the most recent write, not the stale one
+```
+
+**6 — Verify 412 on bad If-Match:**
+```bash
+curl -s -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+  -H "Content-Type: application/merge-patch+json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "If-Match: \"wrong-etag-value\"" \
+  -d '{"planType": "outOfNetwork"}' | python3 -m json.tool | grep -E '"status"|"error"'
+# Expected: "status": 412, "error": "Precondition Failed"
+```
+
+---
+
 ## PATCH propagation — KV → Queue → Elastic
 
 ### 10-step flow
