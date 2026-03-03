@@ -164,6 +164,17 @@ public class IndexWorker {
                 .orElseThrow(() -> new IllegalStateException(
                         "document not found in KV store for id=" + documentId));
 
+        // Stale-event guard: the event etag must match the current KV etag.
+        // If it doesn't, a later write has already superseded this event — the
+        // newer event will index the correct state, so we safely skip this one.
+        if (!etag.equals(doc.getEtag())) {
+            log.info("Skipping stale event for id={} eventEtag={} currentEtag={}",
+                    documentId, etag, doc.getEtag());
+            return;
+        }
+
+        log.info("Processing event id={} eventEtag={}", documentId, etag);
+
         JsonNode parentNode = objectMapper.readTree(doc.getJson());
         indexService.indexParent(documentId, parentNode, doc.getEtag(), null);
 
@@ -172,38 +183,40 @@ public class IndexWorker {
             indexService.indexChild(documentId, child.childId(), child.childDoc(),
                     doc.getEtag(), null);
         }
-        log.info("indexed parent id={} with {} children", documentId, children.size());
+        log.info("Index updated for id={} children={}", documentId, children.size());
     }
 
     /**
      * Handles a PATCH event by re-fetching the authoritative document from the KV store
      * and re-indexing it in Elasticsearch.
      *
-     * We deliberately do NOT apply the partial patch directly to Elastic.
-     * Always fetching the latest committed state from KV (Redis) ensures Elasticsearch
-     * is a consistent, idempotent replica of the single source of truth.
+     * Stale-event guard: if the event etag no longer matches the current KV etag,
+     * a newer write has already superseded this event. We skip indexing — the newer
+     * event carries the correct etag and will index the up-to-date state.
      */
     private void handlePatch(String documentId, String etag) throws Exception {
-        log.info("Processing PATCH event id={} etag={}", documentId, etag);
-
         StoredDocument doc = kvStore.get(documentId)
                 .orElseThrow(() -> new IllegalStateException(
                         "document not found in KV store for id=" + documentId));
 
-        log.info("Fetched latest KV doc id={}; re-indexed into Elastic", documentId);
+        // Stale-event guard — same logic as handleUpsert
+        if (!etag.equals(doc.getEtag())) {
+            log.info("Skipping stale event for id={} eventEtag={} currentEtag={}",
+                    documentId, etag, doc.getEtag());
+            return;
+        }
+
+        log.info("Processing event id={} eventEtag={}", documentId, etag);
 
         JsonNode parentNode = objectMapper.readTree(doc.getJson());
-        // Full upsert — Elasticsearch replaces the document by id, guaranteeing
-        // the indexed state matches the current KV contents exactly.
         indexService.indexParent(documentId, parentNode, doc.getEtag(), null);
 
-        // Re-index children so their stored etag stays consistent with the parent.
         List<PlanDocumentSplitter.ChildEntry> children = splitter.extractChildren(doc.getJson());
         for (PlanDocumentSplitter.ChildEntry child : children) {
             indexService.indexChild(documentId, child.childId(), child.childDoc(),
                     doc.getEtag(), null);
         }
-        log.info("PATCH re-index complete id={} children={}", documentId, children.size());
+        log.info("Index updated for id={} children={}", documentId, children.size());
     }
 
     /**
