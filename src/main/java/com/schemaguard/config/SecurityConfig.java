@@ -63,6 +63,8 @@ public class SecurityConfig {
                 // index admin endpoints are public — demo/debug only, no data exposed
                 .requestMatchers("/api/v1/index/**").permitAll()
                 .requestMatchers("/api/v1/plan/**").authenticated()
+                // search endpoints return plan data — require a valid Bearer token
+                .requestMatchers("/api/v1/search/**").authenticated()
                 .anyRequest().authenticated()
             )
             .oauth2ResourceServer(oauth2 -> oauth2
