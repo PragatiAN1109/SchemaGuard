@@ -438,9 +438,15 @@ All endpoints require a valid Google Bearer token (same as `/api/v1/plan/**`).
 
 `childField` and `childValue` must be provided together or both omitted.
 
-**Example — find parents that have a child with `name = "Yearly physical"`:**
+**Example — find parents that have a child with `linkedService.name = "Yearly physical"`:**
 ```bash
-curl -s "http://localhost:8080/api/v1/search?childField=name&childValue=Yearly%20physical" \
+curl -s "http://localhost:8080/api/v1/search?childField=linkedService.name&childValue=Yearly%20physical" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+**Example — find parents with a child of objectType = planservice:**
+```bash
+curl -s "http://localhost:8080/api/v1/search?childField=objectType&childValue=planservice" \
   -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 

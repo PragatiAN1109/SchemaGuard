@@ -134,28 +134,29 @@ public class PlanSearchService {
     // ─────────────────────────────────────────────────────────────────────────
 
     private String buildParentSearchQuery(String childField, String childValue, String q) {
-        // Inner child query — term for exact match (keyword fields), match for text
+        // Inner child query:
+        // If childField+childValue supplied, use multi_match targeting that specific field
+        // (supports dotted paths like "linkedService.name") plus a wildcard fallback so
+        // partial paths also work. If no filter, match_all so the endpoint lists all parents.
         String innerChildQuery;
         if (hasValue(childField) && hasValue(childValue)) {
             innerChildQuery = """
                     {
-                      "bool": {
-                        "should": [
-                          { "term":  { "%s": "%s" } },
-                          { "match": { "%s": "%s" } }
-                        ],
-                        "minimum_should_match": 1
+                      "multi_match": {
+                        "query": "%s",
+                        "fields": ["%s", "%s.*"],
+                        "type": "best_fields",
+                        "lenient": true
                       }
                     }
-                    """.formatted(childField, childValue, childField, childValue);
+                    """.formatted(childValue, childField, childField);
         } else {
             innerChildQuery = """
                     { "match_all": {} }
                     """;
         }
 
-        // has_child clause wrapping the inner query
-        // type must match the child relation name in the join mapping
+        // has_child clause — type must match the child relation name in the join mapping
         String hasChildClause = """
                 {
                   "has_child": {
@@ -165,7 +166,7 @@ public class PlanSearchService {
                 }
                 """.formatted(TYPE_CHILD, innerChildQuery);
 
-        // If q param provided, combine has_child + match on parent with bool/must
+        // If q param provided, combine has_child + multi_match on parent with bool/must
         if (hasValue(q)) {
             return """
                     {
@@ -173,7 +174,7 @@ public class PlanSearchService {
                         "bool": {
                           "must": [
                             %s,
-                            { "multi_match": { "query": "%s", "fields": ["*"] } }
+                            { "multi_match": { "query": "%s", "fields": ["*"], "lenient": true } }
                           ]
                         }
                       }
@@ -181,7 +182,6 @@ public class PlanSearchService {
                     """.formatted(hasChildClause, q);
         }
 
-        // No q — just has_child (or match_all if no child filter either)
         return """
                 {
                   "query": %s
