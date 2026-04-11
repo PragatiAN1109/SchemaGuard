@@ -48,10 +48,37 @@ public class PlanController {
     }
 
     // ---------------------------
+    // GET /api/v1/plan  (list all stored plans — demo/debug)
+    // ---------------------------
+    @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> listAllPlans() {
+        log.info("[DEMO] GET /api/v1/plan — listing all plans from KV store");
+        java.util.List<String> objectIds = store.keys();
+
+        java.util.List<Map<String, Object>> plans = new java.util.ArrayList<>();
+        for (String id : objectIds) {
+            store.get(id).ifPresent(doc -> {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("objectId", id);
+                entry.put("etag", doc.getEtag());
+                entry.put("lastModified", doc.getLastModified().toString());
+                plans.add(entry);
+            });
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("count", plans.size());
+        response.put("plans", plans);
+        log.info("[DEMO] KV store contains {} plans", plans.size());
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(response);
+    }
+
+    // ---------------------------
     // POST /api/v1/plan
     // ---------------------------
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> createPlan(@RequestBody String rawJson) {
+        log.info("[DEMO] POST /api/v1/plan — request received");
         schemaValidator.validatePlanJson(rawJson);
 
         String objectId = JsonUtil.extractTopLevelObjectId(objectMapper, rawJson);
@@ -72,6 +99,7 @@ public class PlanController {
 
         // publish UPSERT event after successful create
         eventPublisher.publish(IndexEvent.of(IndexEventOperation.UPSERT, objectId, doc.getEtag()));
+        log.info("[DEMO] POST created plan id={} etag={} → published UPSERT event to queue", objectId, doc.getEtag());
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("objectId", objectId);
@@ -92,12 +120,14 @@ public class PlanController {
             @PathVariable String objectId,
             @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String ifNoneMatch
     ) {
+        log.info("[DEMO] GET /api/v1/plan/{} — If-None-Match={}", objectId, ifNoneMatch);
         StoredDocument doc = store.get(objectId)
                 .orElseThrow(() -> new NotFoundException("Plan not found: " + objectId));
 
         String storedEtag = doc.getEtag();
 
         if (ifNoneMatch != null && stripQuotes(ifNoneMatch).equals(storedEtag)) {
+            log.info("[DEMO] GET id={} → 304 Not Modified (ETag match)", objectId);
             return ResponseEntity.status(304)
                     .eTag(storedEtag)
                     .build();
@@ -122,6 +152,7 @@ public class PlanController {
             @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
             @RequestBody String rawJson
     ) {
+        log.info("[DEMO] PUT /api/v1/plan/{} — If-Match={}", objectId, ifMatch);
         StoredDocument existing = store.get(objectId)
                 .orElseThrow(() -> new NotFoundException("Plan not found: " + objectId));
 
@@ -137,7 +168,7 @@ public class PlanController {
 
         // publish UPSERT event after successful full replace
         eventPublisher.publish(IndexEvent.of(IndexEventOperation.UPSERT, objectId, updated.getEtag()));
-        log.info("KV updated id={} newEtag={}; published event", objectId, updated.getEtag());
+        log.info("[DEMO] PUT replaced plan id={} newEtag={} → published UPSERT event to queue", objectId, updated.getEtag());
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("objectId", objectId);
@@ -163,6 +194,7 @@ public class PlanController {
             @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
             @RequestBody String patchJson
     ) {
+        log.info("[DEMO] PATCH /api/v1/plan/{} — If-Match={}", objectId, ifMatch);
         StoredDocument existing = store.get(objectId)
                 .orElseThrow(() -> new NotFoundException("Plan not found: " + objectId));
 
@@ -191,9 +223,11 @@ public class PlanController {
 
         // Publish PATCH event only after KV update succeeds — carries the NEW etag.
         // Never published on 400 / 404 / 412 paths.
+        // PATCH updates existing objects — document count in ES stays the same.
+        // The worker re-indexes the parent and all children with the merged payload.
         IndexEvent patchEvent = IndexEvent.of(IndexEventOperation.PATCH, objectId, updated.getEtag());
         eventPublisher.publish(patchEvent);
-        log.info("KV updated id={} newEtag={}; published event", objectId, updated.getEtag());
+        log.info("[DEMO] PATCH updated plan id={} newEtag={} → published PATCH event to queue (re-indexes parent+children, count stays same)", objectId, updated.getEtag());
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
@@ -209,6 +243,7 @@ public class PlanController {
             @PathVariable String objectId,
             @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch
     ) {
+        log.info("[DEMO] DELETE /api/v1/plan/{} — If-Match={}", objectId, ifMatch);
         StoredDocument existing = store.get(objectId)
                 .orElseThrow(() -> new NotFoundException("Plan not found: " + objectId));
 
@@ -226,8 +261,7 @@ public class PlanController {
         // Never published on 404 / 412 error paths.
         IndexEvent deleteEvent = IndexEvent.of(IndexEventOperation.DELETE, objectId, etagBeforeDelete);
         eventPublisher.publish(deleteEvent);
-        log.info("DELETE removed from KV id={}; published DELETE event for cascaded Elastic removal",
-                objectId);
+        log.info("[DEMO] DELETE removed plan id={} from KV → published DELETE event to queue (will cascade-remove parent+children from ES)", objectId);
 
         return ResponseEntity.noContent().build();
     }

@@ -8,9 +8,9 @@ import org.springframework.stereotype.Component;
 /**
  * No-op implementation of IndexEventPublisher for the 'test' profile.
  *
- * The test profile uses InMemoryKeyValueStore and has no Redis connection.
+ * The test profile uses InMemoryKeyValueStore and has no RabbitMQ broker.
  * This bean satisfies the IndexEventPublisher dependency in PlanController
- * without attempting any Redis operations.
+ * without attempting any messaging operations.
  */
 @Component
 @Profile("test")

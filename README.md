@@ -1,6 +1,6 @@
 # SchemaGuard
 
-A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch parent-child indexing, Redis Streams event publishing + consumer worker, and Google OAuth2 JWT security.
+A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch parent-child indexing, RabbitMQ event-driven indexing, and Google OAuth2 JWT security.
 
 ## overview
 
@@ -15,8 +15,8 @@ SchemaGuard is a RESTful web service that provides full CRUD operations for heal
 - **public endpoint: `GET /api/v1/schema/plan` — no auth required**
 - **standardized error contract — every error returns the same JSON shape**
 - Redis as primary KV store — data persists across app restarts
-- **Redis Streams event publishing — UPSERT/PATCH/DELETE events on every successful write**
-- **IndexWorker — background consumer that reads events and syncs Elasticsearch**
+- **RabbitMQ event-driven indexing — UPSERT/PATCH/DELETE events published on every successful write**
+- **RabbitMQIndexListener — consumer that processes events and syncs Elasticsearch**
 - Elasticsearch parent-child index — `plans-index` with join mapping
 - `IndexService` abstraction — clean interface for all ES index operations
 - Docker Compose for one-command demo startup
@@ -41,18 +41,17 @@ Starts three services: **Redis** (6379), **Elasticsearch** (9200), **app** (8080
 
 Expected startup logs:
 ```
-IndexWorker created consumer group 'schemaguard-indexers' on stream 'schemaguard:index-events'
-IndexWorker started (stream=schemaguard:index-events, group=schemaguard-indexers, consumer=indexer-1)
+RabbitMQIndexListener listening on queue 'schemaguard.index.queue'
 Elasticsearch index 'plans-index' initialized with parent-child mapping
 Started SchemaGuardApplication
 ```
 
 ---
 
-## IndexWorker — Redis Streams consumer
+## RabbitMQIndexListener — RabbitMQ consumer
 
-`IndexWorker` is a background `@Scheduled` component (active on `redis` profile only) that
-consumes events from the Redis Stream and synchronises Elasticsearch.
+`RabbitMQIndexListener` is a `@RabbitListener` component (active on `redis` profile only) that
+consumes events from the RabbitMQ queue and synchronises Elasticsearch.
 
 ### flow
 
@@ -60,11 +59,11 @@ consumes events from the Redis Stream and synchronises Elasticsearch.
 POST /api/v1/plan
   → KV store (Redis)
   → publish UPSERT to stream
-  → IndexWorker picks up event (within ~1s)
+  → RabbitMQIndexListener picks up event (within ~1s)
   → fetches doc from KV store
   → IndexService.indexParent() + indexChild() per linkedPlanService
   → Elasticsearch updated
-  → XACK (message removed from PEL)
+  → message acknowledged (message removed from PEL)
 ```
 
 ### parent-child split
@@ -81,17 +80,15 @@ The `planCostShares` object and nested cost shares are stored within the parent 
 
 | config key | env var | default |
 |------------|---------|--------|
-| `index.events.stream` | `INDEX_EVENTS_STREAM` | `schemaguard:index-events` |
-| `index.worker.group` | `INDEX_WORKER_GROUP` | `schemaguard-indexers` |
-| `index.worker.consumer` | `INDEX_WORKER_CONSUMER` | `indexer-1` |
-| `index.worker.batch-size` | `INDEX_WORKER_BATCH_SIZE` | `10` |
-| `index.worker.block-ms` | `INDEX_WORKER_BLOCK_MS` | `2000` |
-| `index.worker.poll-interval-ms` | `INDEX_WORKER_POLL_INTERVAL_MS` | `1000` |
+| `spring.rabbitmq.host` | `RABBITMQ_HOST` | `localhost` |
+| `spring.rabbitmq.port` | `RABBITMQ_PORT` | `5672` |
+| `spring.rabbitmq.username` | `RABBITMQ_USER` | `guest` |
+| `spring.rabbitmq.password` | `RABBITMQ_PASS` | `guest` |
 
 ### retry strategy
 
 - 3 attempts per message with 250ms / 500ms / 1000ms backoff
-- on success: `XACK` — message removed from PEL
+- on success: `message acknowledged` — message removed from PEL
 - on all retries exhausted: **do NOT ACK** — message stays in PEL and is re-delivered on next startup via pending message check
 - app never crashes on indexing failure
 
@@ -119,12 +116,12 @@ curl -X POST http://localhost:8080/api/v1/plan \
 
 **step 2 — confirm event in stream:**
 ```bash
-docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
 ```
 
 **step 3 — confirm worker processed it (all ACKed, PEL empty):**
 ```bash
-docker exec -it schemaguard-redis redis-cli XPENDING schemaguard:index-events schemaguard-indexers - + 10
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Ready/Unacked counts
 ```
 Expected: empty (all messages ACKed)
 
@@ -144,7 +141,7 @@ Expected: 2 hits (the two linkedPlanServices entries)
 
 **step 6 — end-to-end PATCH propagation demo (KV → Queue → Elastic):**
 
-> Index: `plans-index` · Stream: `schemaguard:index-events` · Join field: `my_join_field`
+> Index: `plans-index` · Stream: `schemaguard.index.queue` · Join field: `my_join_field`
 
 **6a — query Elastic BEFORE the patch (baseline):**
 ```bash
@@ -170,9 +167,9 @@ Fetched latest KV doc id=12xvxc345ssdsds-508; re-indexed into Elastic
 PATCH re-index complete id=12xvxc345ssdsds-508 children=2
 ```
 
-**6c — confirm PATCH event in the Redis Stream:**
+**6c — confirm PATCH event in the RabbitMQ queue:**
 ```bash
-docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
 ```
 Look for an entry with `operation=PATCH` and `documentId=12xvxc345ssdsds-508`.
 
@@ -195,7 +192,7 @@ curl -s -X GET "http://localhost:9200/plans-index/_search" \
 
 **step 7 — cascaded delete demo (KV + Elastic parent + Elastic children):**
 
-> Index: `plans-index` · Stream: `schemaguard:index-events` · Join field: `my_join_field`
+> Index: `plans-index` · Stream: `schemaguard.index.queue` · Join field: `my_join_field`
 
 **7a — verify parent exists in Elastic BEFORE delete:**
 ```bash
@@ -236,9 +233,9 @@ Deleted children for parent id=12xvxc345ssdsds-508
 Deleted parent id=12xvxc345ssdsds-508
 ```
 
-**7e — confirm DELETE event in the Redis Stream:**
+**7e — confirm DELETE event in the RabbitMQ queue:**
 ```bash
-docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
 ```
 Look for an entry with `operation=DELETE` and `documentId=12xvxc345ssdsds-508`.
 
@@ -268,7 +265,7 @@ curl -s -X GET "http://localhost:9200/plans-index/_search" \
 
 **7i — confirm no stuck messages in PEL:**
 ```bash
-docker exec -it schemaguard-redis redis-cli XPENDING schemaguard:index-events schemaguard-indexers - + 10
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Ready/Unacked counts
 # Expected: empty list
 ```
 
@@ -279,7 +276,7 @@ docker logs schemaguard-app | grep -i indexworker
 
 Expected:
 ```
-IndexWorker started (stream=schemaguard:index-events, group=schemaguard-indexers, consumer=indexer-1)
+RabbitMQIndexListener listening on queue 'schemaguard.index.queue'
 processing event op=UPSERT id=12xvxc345ssdsds-508 etag=<sha256> msgId=...
 indexed parent id=12xvxc345ssdsds-508 with 2 children
 Processing PATCH event id=12xvxc345ssdsds-508 etag=<new-sha256>
@@ -297,7 +294,7 @@ Deleted parent id=12xvxc345ssdsds-508
 
 ### Why this matters
 
-Indexing into Elasticsearch happens **asynchronously** via Redis Streams. Between
+Indexing into Elasticsearch happens **asynchronously** via RabbitMQ. Between
 the API returning a `200` and the worker processing the event, another write may
 arrive and produce a newer version. Without a version check, the worker could
 index a stale snapshot and overwrite the correct, newer Elastic state.
@@ -305,7 +302,7 @@ index a stale snapshot and overwrite the correct, newer Elastic state.
 ### How it works
 
 ```
-Client                  API (KV + Redis)            IndexWorker         Elasticsearch
+Client                  API (KV + Redis)            RabbitMQIndexListener         Elasticsearch
   │                          │                           │                    │
   ├─ PATCH v1 ──────────────►│ If-Match: etag_v0         │                    │
   │                          │ ETag check passes          │                    │
@@ -431,15 +428,15 @@ PATCH /api/v1/plan/{objectId}
   2.  Apply JSON Merge Patch (RFC 7396)   → merged document
   3.  Validate merged doc (JSON Schema)   → 400 if invalid
   4.  Write merged doc to KV (Redis)      → new ETag generated
-  5.  Publish PATCH event to Redis Stream
+  5.  Publish PATCH event to RabbitMQ queue
       fields: operation=PATCH, documentId, etag=<NEW etag>, timestamp
       (fire-and-forget — API response is NOT blocked by stream write)
   6.  Return 200 with updated body + ETag header
       ↓ ~1 s later
-  7.  IndexWorker reads PATCH event via XREADGROUP
+  7.  RabbitMQIndexListener reads PATCH event via RabbitMQ consumer
   8.  Fetches authoritative document from KV store (not from Elastic)
   9.  Calls IndexService.indexParent() → Elasticsearch upsert by id
-  10. Re-indexes all linkedPlanServices children; XACK message
+  10. Re-indexes all linkedPlanServices children; message acknowledged message
 ```
 
 ### Why re-fetch from KV rather than patch Elastic directly
@@ -455,8 +452,8 @@ PATCH /api/v1/plan/{objectId}
 
 | Name | Value |
 |------|-------|
-| Redis Stream | `schemaguard:index-events` |
-| Consumer group | `schemaguard-indexers` |
+| RabbitMQ queue | `schemaguard.index.queue` |
+| Consumer group | `schemaguard.index.exchange` |
 | Elasticsearch index | `plans-index` |
 | Join field | `my_join_field` |
 | Parent join value | `"plan"` (plain string) |
@@ -474,12 +471,12 @@ DELETE /api/v1/plan/{objectId}
   2.  Validate If-Match ETag (if provided) → 412 if stale
   3.  Capture etag before deletion
   4.  Delete document from KV store (Redis)
-  5.  Publish DELETE event to Redis Stream
+  5.  Publish DELETE event to RabbitMQ queue
       fields: operation=DELETE, documentId, etag=<last-known etag>, timestamp
       (fire-and-forget — 204 response is NOT blocked by stream write)
   6.  Return 204 No Content
       ↓ ~1 s later
-  7.  IndexWorker reads DELETE event via XREADGROUP
+  7.  RabbitMQIndexListener reads DELETE event via RabbitMQ consumer
   8.  Calls IndexService.deleteChildren(parentId)
       → delete_by_query with routing=parentId + parent_id term filter
       → removes ALL child documents for this parent in one query
@@ -487,7 +484,7 @@ DELETE /api/v1/plan/{objectId}
   9.  Calls IndexService.deleteParent(parentId)
       → DELETE /<index>/_doc/<parentId>
       → 404 from Elastic handled gracefully (already absent = success)
-  10. XACK — message removed from PEL
+  10. message acknowledged — message removed from PEL
 ```
 
 ### Why children must be deleted before the parent
@@ -527,8 +524,8 @@ POST /plans-index/_delete_by_query?routing=<parentId>&refresh=true
 
 | Name | Value |
 |------|-------|
-| Redis Stream | `schemaguard:index-events` |
-| Consumer group | `schemaguard-indexers` |
+| RabbitMQ queue | `schemaguard.index.queue` |
+| Consumer group | `schemaguard.index.exchange` |
 | Elasticsearch index | `plans-index` |
 | Join field | `my_join_field` |
 | Child type name | `child` |
@@ -541,7 +538,7 @@ POST /plans-index/_delete_by_query?routing=<parentId>&refresh=true
 Search endpoints expose Elasticsearch parent-child join queries as REST APIs.
 All endpoints require a valid Google Bearer token (same as `/api/v1/plan/**`).
 
-> **Indexing is asynchronous.** Documents are indexed by `IndexWorker` after the API
+> **Indexing is asynchronous.** Documents are indexed by `RabbitMQIndexListener` after the API
 > writes to Redis — search results may lag behind the KV store by ~1 s after a write.
 > Always allow the worker to process events before running search queries.
 
@@ -695,9 +692,9 @@ curl -s -X GET "http://localhost:9200/plans-index/_search?routing=12xvxc345ssdsd
 
 ---
 
-## queueing (Redis Streams) — publisher
+## queueing (RabbitMQ) — publisher
 
-Every successful write publishes an event to `schemaguard:index-events`.
+Every successful write publishes an event to `schemaguard.index.queue`.
 
 | operation | event type | condition |
 |-----------|------------|----------|
@@ -708,13 +705,13 @@ Every successful write publishes an event to `schemaguard:index-events`.
 
 ```bash
 # inspect stream
-docker exec -it schemaguard-redis redis-cli XRANGE schemaguard:index-events - +
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
 
 # count events
-docker exec -it schemaguard-redis redis-cli XLEN schemaguard:index-events
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Total messages
 
 # check pending (unACKed) messages
-docker exec -it schemaguard-redis redis-cli XPENDING schemaguard:index-events schemaguard-indexers - + 10
+# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Ready/Unacked counts
 ```
 
 ---
@@ -792,6 +789,7 @@ SchemaGuard/
 │   ├── config/
 │   │   ├── AppConfig.java
 │   │   ├── ElasticsearchConfig.java
+│   │   ├── RabbitMQConfig.java
 │   │   ├── RedisConfig.java
 │   │   └── SecurityConfig.java
 │   ├── elastic/
@@ -805,10 +803,10 @@ SchemaGuard/
 │   │   ├── IndexEvent.java
 │   │   ├── IndexEventOperation.java
 │   │   ├── IndexEventPublisher.java
-│   │   ├── RedisStreamEventPublisher.java
+│   │   ├── RabbitMQEventPublisher.java
+│   │   ├── RabbitMQIndexListener.java              ← @RabbitListener consumer
 │   │   ├── NoOpIndexEventPublisher.java
 │   │   ├── PlanDocumentSplitter.java              ← extracts linkedPlanServices as children
-│   │   └── IndexWorker.java                       ← XREADGROUP consumer, retry, XACK
 │   ├── controller/
 │   │   ├── IndexAdminController.java
 │   │   ├── PlanController.java

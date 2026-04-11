@@ -6,7 +6,6 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      # Named volume — Redis data persists across container restarts
       - redis-data:/data
     command: redis-server --appendonly yes
     healthcheck:
@@ -15,15 +14,30 @@ services:
       timeout: 3s
       retries: 5
 
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: schemaguard-rabbitmq
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # Management UI (http://localhost:15672 guest/guest)
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
   elasticsearch:
     image: elasticsearch:8.13.4
     container_name: schemaguard-elasticsearch
     environment:
-      # Single-node cluster — no inter-node discovery needed
       - discovery.type=single-node
-      # Disable TLS/auth for local demo — never use in production
       - xpack.security.enabled=false
-      # Heap size — keep small for local demo
       - ES_JAVA_OPTS=-Xms512m -Xmx512m
     ports:
       - "9200:9200"
@@ -44,19 +58,25 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Redis connection
+      # Redis connection (KV store only)
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # RabbitMQ connection (event queue)
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
       # Elasticsearch connection
       - ELASTIC_HOST=elasticsearch
       - ELASTIC_PORT=9200
-      # Activates the redis Spring profile (RedisKeyValueStore + RedisConfig + security)
+      # Spring profile
       - SPRING_PROFILES_ACTIVE=redis
-      # Google OAuth2 Client ID for JWT audience validation.
-      # Set before running: export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+      # Google OAuth2 Client ID
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
     depends_on:
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
@@ -64,6 +84,8 @@ services:
 
 volumes:
   redis-data:
+    driver: local
+  rabbitmq-data:
     driver: local
   es-data:
     driver: local

@@ -68,9 +68,9 @@ public class ElasticsearchIndexService implements IndexService {
 
             String url = docUrl(parentId, null);
             put(url, doc);
-            log.info("indexed parent id={}", parentId);
+            log.info("[DEMO] ES indexed parent id={}", parentId);
         } catch (Exception ex) {
-            log.warn("failed to index parent id={} — {}", parentId, ex.getMessage());
+            log.warn("[DEMO] ES failed to index parent id={} — {}", parentId, ex.getMessage());
         }
     }
 
@@ -91,9 +91,9 @@ public class ElasticsearchIndexService implements IndexService {
             // routing = parentId is mandatory — guarantees co-location with parent on same shard
             String url = docUrl(childId, parentId);
             put(url, doc);
-            log.info("indexed child id={} routing={}", childId, parentId);
+            log.info("[DEMO] ES indexed child id={} routing={}", childId, parentId);
         } catch (Exception ex) {
-            log.warn("failed to index child id={} routing={} — {}", childId, parentId, ex.getMessage());
+            log.warn("[DEMO] ES failed to index child id={} routing={} — {}", childId, parentId, ex.getMessage());
         }
     }
 
@@ -105,7 +105,7 @@ public class ElasticsearchIndexService implements IndexService {
         // patchParent is a full re-index of the parent with the merged document.
         // Upsert semantics apply — same as indexParent.
         indexParent(parentId, patchedParentDoc, etag, null);
-        log.info("patched (re-indexed) parent id={}", parentId);
+        log.info("[DEMO] ES patched (re-indexed) parent id={}", parentId);
     }
 
     // ─────────────────────────────────────────────────────────
@@ -116,12 +116,11 @@ public class ElasticsearchIndexService implements IndexService {
         try {
             String url = docUrl(parentId, null);
             restTemplate.exchange(url, HttpMethod.DELETE, jsonEntity(null), String.class);
-            log.info("deleted parent id={}", parentId);
+            log.info("[DEMO] ES deleted parent id={}", parentId);
         } catch (HttpClientErrorException.NotFound ex) {
-            // idempotent — already gone is fine
-            log.info("delete parent id={} — not found, already absent", parentId);
+            log.info("[DEMO] ES delete parent id={} — not found, already absent", parentId);
         } catch (Exception ex) {
-            log.warn("failed to delete parent id={} — {}", parentId, ex.getMessage());
+            log.warn("[DEMO] ES failed to delete parent id={} — {}", parentId, ex.getMessage());
         }
     }
 
@@ -147,9 +146,9 @@ public class ElasticsearchIndexService implements IndexService {
                     """.formatted(TYPE_CHILD, parentId);
 
             restTemplate.exchange(url, HttpMethod.POST, jsonEntity(body), String.class);
-            log.info("deleted children for parent id={}", parentId);
+            log.info("[DEMO] ES deleted children for parent id={}", parentId);
         } catch (Exception ex) {
-            log.warn("failed to delete children for parent id={} — {}", parentId, ex.getMessage());
+            log.warn("[DEMO] ES failed to delete children for parent id={} — {}", parentId, ex.getMessage());
         }
     }
 
@@ -172,11 +171,15 @@ public class ElasticsearchIndexService implements IndexService {
         return doc;
     }
 
-    /** Builds the document URL, appending ?routing=<parentId> for child docs. */
+    /**
+     * Builds the document URL with refresh=true for immediate search visibility.
+     * Appends ?routing=<parentId> for child docs (required for join queries).
+     * refresh=true ensures changes are searchable immediately — critical for demo.
+     */
     private String docUrl(String docId, String routing) {
-        String url = baseUrl() + "/_doc/" + docId;
+        String url = baseUrl() + "/_doc/" + docId + "?refresh=true";
         if (routing != null) {
-            url += "?routing=" + routing;
+            url += "&routing=" + routing;
         }
         return url;
     }

@@ -2,6 +2,7 @@ package com.schemaguard.store;
 
 import com.schemaguard.model.StoredDocument;
 
+import java.util.List;
 import java.util.Optional;
 
 public interface KeyValueStore {
@@ -33,4 +34,10 @@ public interface KeyValueStore {
      * Checks if a key exists.
      */
     boolean exists(String objectId);
+
+    /**
+     * Returns all stored objectIds.
+     * Used by debug/demo endpoints to list all plans in the KV store.
+     */
+    List<String> keys();
 }

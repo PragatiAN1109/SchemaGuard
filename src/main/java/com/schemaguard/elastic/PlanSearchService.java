@@ -18,29 +18,21 @@ import java.util.List;
 import java.util.Map;
 
 import static com.schemaguard.elastic.PlanIndexConstants.*;
-
 /**
  * Elasticsearch search service for parent-child join queries.
  *
- * Two query strategies are implemented using plain HTTP via RestTemplate,
- * consistent with ElasticsearchIndexService:
+ * Three query strategies:
  *
- * 1. searchParentsByChildField — has_child query
- *    Finds parent (plan) documents that have at least one child document
- *    matching a given field/value. Optionally filtered further by a free-text
- *    query on the parent itself (q param).
+ * 1. searchAll — match_all across the entire index (parents + children).
+ *    Returns total document count — useful for demo visibility.
  *
- * 2. findChildrenByParent — has_parent query
+ * 2. searchParentsByChildField — has_child query.
+ *    Finds parent (plan) documents that have at least one child matching
+ *    a given field/value. Supports both term match and range queries
+ *    (e.g. copay > 100).
+ *
+ * 3. findChildrenByParent — has_parent query.
  *    Returns all child documents belonging to a specific parentId.
- *    Uses routing=parentId so the query targets the correct shard only.
- *
- * Join field contract (must match PlanIndexInitializer mapping):
- *   my_join_field = "plan"                               (parent)
- *   my_join_field = {"name":"child","parent":"<id>"}     (child)
- *
- * Routing contract:
- *   child documents MUST be queried with routing=parentId.
- *   Parent documents use default routing (their own id).
  */
 @Service
 public class PlanSearchService {
@@ -61,48 +53,57 @@ public class PlanSearchService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // searchParentsByChildField
+    // searchAll — match_all query returning total document count
+    // ─────────────────────────────────────────────────────────────────────────
+    public Map<String, Object> searchAll() {
+        log.info("[DEMO] ES searchAll — match_all query for total document count");
+        String queryBody = """
+                {
+                  "query": { "match_all": {} },
+                  "size": 100
+                }
+                """;
+        try {
+            String url = baseUrl() + "/_search";
+            String raw = post(url, queryBody);
+            return parseAllResults(raw);
+        } catch (Exception ex) {
+            log.warn("[DEMO] searchAll failed — {}", ex.getMessage());
+            throw new RuntimeException("Elasticsearch query failed: " + ex.getMessage(), ex);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // searchParentsByChildField — has_child query
     //
-    // Builds a has_child query so parents are returned when at least one of
-    // their children matches the given field/value.
-    //
-    // If childField/childValue are blank, falls back to match_all so the
-    // endpoint still works as a plain "list all parents" call.
-    //
-    // If q is provided, it is combined via bool/must with the has_child clause
-    // so the parent document itself must also match.
+    // Supports two modes:
+    //   1. Term match: childField=copay & childValue=175
+    //   2. Range query: childField=copay & childOp=gt & childValue=100
+    //      (childOp can be: gt, gte, lt, lte)
     // ─────────────────────────────────────────────────────────────────────────
     public Map<String, Object> searchParentsByChildField(
-            String childField, String childValue, String q) {
+            String childField, String childValue, String childOp, String q) {
 
-        String queryBody = buildParentSearchQuery(childField, childValue, q);
-        log.info("searchParentsByChildField childField={} childValue={} q={}",
-                childField, childValue, q);
+        String queryBody = buildParentSearchQuery(childField, childValue, childOp, q);
+        log.info("[DEMO] ES searchParentsByChildField childField={} childOp={} childValue={} q={}",
+                childField, childOp, childValue, q);
 
         try {
             String url = baseUrl() + "/_search";
             String raw = post(url, queryBody);
             return parseParentResults(raw, childField, childValue);
         } catch (Exception ex) {
-            log.warn("searchParentsByChildField failed — {}", ex.getMessage());
+            log.warn("[DEMO] searchParentsByChildField failed — {}", ex.getMessage());
             throw new RuntimeException("Elasticsearch query failed: " + ex.getMessage(), ex);
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // findChildrenByParent
-    //
-    // Uses a has_parent query filtered to parentId so only children of that
-    // specific parent are returned.
-    //
-    // routing=parentId is appended to the URL — this is REQUIRED for
-    // parent-child joins. Without it, the query scatters across all shards
-    // and may miss child documents (or return results from wrong parents).
+    // findChildrenByParent — has_parent query
     // ─────────────────────────────────────────────────────────────────────────
     public Map<String, Object> findChildrenByParent(String parentId) {
-        log.info("findChildrenByParent parentId={}", parentId);
+        log.info("[DEMO] ES findChildrenByParent parentId={}", parentId);
 
-        // has_parent query: find children whose parent document has objectId == parentId
         String queryBody = """
                 {
                   "query": {
@@ -119,12 +120,11 @@ public class PlanSearchService {
                 """.formatted(TYPE_PLAN, parentId);
 
         try {
-            // routing=parentId ensures we only hit the shard where this parent's children live
             String url = baseUrl() + "/_search?routing=" + parentId;
             String raw = post(url, queryBody);
             return parseChildResults(raw, parentId);
         } catch (Exception ex) {
-            log.warn("findChildrenByParent failed parentId={} — {}", parentId, ex.getMessage());
+            log.warn("[DEMO] findChildrenByParent failed parentId={} — {}", parentId, ex.getMessage());
             throw new RuntimeException("Elasticsearch query failed: " + ex.getMessage(), ex);
         }
     }
@@ -133,13 +133,24 @@ public class PlanSearchService {
     // Query builders
     // ─────────────────────────────────────────────────────────────────────────
 
-    private String buildParentSearchQuery(String childField, String childValue, String q) {
-        // Inner child query:
-        // If childField+childValue supplied, use multi_match targeting that specific field
-        // (supports dotted paths like "linkedService.name") plus a wildcard fallback so
-        // partial paths also work. If no filter, match_all so the endpoint lists all parents.
+    private String buildParentSearchQuery(String childField, String childValue,
+                                          String childOp, String q) {
         String innerChildQuery;
-        if (hasValue(childField) && hasValue(childValue)) {
+
+        if (hasValue(childField) && hasValue(childValue) && hasValue(childOp)) {
+            // Range query: e.g. copay > 100
+            // childOp must be one of: gt, gte, lt, lte
+            innerChildQuery = """
+                    {
+                      "range": {
+                        "%s": {
+                          "%s": %s
+                        }
+                      }
+                    }
+                    """.formatted(childField, childOp, childValue);
+        } else if (hasValue(childField) && hasValue(childValue)) {
+            // Term/match query
             innerChildQuery = """
                     {
                       "multi_match": {
@@ -156,7 +167,7 @@ public class PlanSearchService {
                     """;
         }
 
-        // has_child clause — type must match the child relation name in the join mapping
+        // has_child clause
         String hasChildClause = """
                 {
                   "has_child": {
@@ -166,7 +177,7 @@ public class PlanSearchService {
                 }
                 """.formatted(TYPE_CHILD, innerChildQuery);
 
-        // If q param provided, combine has_child + multi_match on parent with bool/must
+        // If q param provided, combine with bool/must
         if (hasValue(q)) {
             return """
                     {
@@ -190,8 +201,41 @@ public class PlanSearchService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Response parsers — convert raw ES JSON into clean response maps
+    // Response parsers
     // ─────────────────────────────────────────────────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseAllResults(String raw) throws Exception {
+        JsonNode root = objectMapper.readTree(raw);
+        JsonNode hits = root.path("hits").path("hits");
+        long total = root.path("hits").path("total").path("value").asLong(0);
+
+        List<Map<String, Object>> results = new ArrayList<>();
+        if (hits.isArray()) {
+            for (JsonNode hit : hits) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("id", hit.path("_id").asText());
+                // Determine if parent or child from the join field
+                JsonNode joinField = hit.path("_source").path(JOIN_FIELD);
+                if (joinField.isTextual()) {
+                    entry.put("type", joinField.asText()); // "plan"
+                } else if (joinField.isObject()) {
+                    entry.put("type", joinField.path("name").asText()); // "child"
+                    entry.put("parent", joinField.path("parent").asText());
+                }
+                entry.put("source", objectMapper.convertValue(
+                        hit.path("_source"), Map.class));
+                results.add(entry);
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("totalDocuments", total);
+        response.put("returned", results.size());
+        response.put("documents", results);
+        log.info("[DEMO] ES searchAll returned {} total documents", total);
+        return response;
+    }
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseParentResults(
@@ -205,11 +249,10 @@ public class PlanSearchService {
             for (JsonNode hit : hits) {
                 Map<String, Object> entry = new LinkedHashMap<>();
                 entry.put("parentId", hit.path("_id").asText());
-                entry.put("score",    hit.path("_score").asDouble());
-                entry.put("source",   objectMapper.convertValue(
+                entry.put("score", hit.path("_score").asDouble());
+                entry.put("source", objectMapper.convertValue(
                         hit.path("_source"), Map.class));
 
-                // matchedBy — tells the caller which filter was applied
                 Map<String, Object> matchedBy = new LinkedHashMap<>();
                 matchedBy.put("childField", hasValue(childField) ? childField : null);
                 matchedBy.put("childValue", hasValue(childValue) ? childValue : null);
@@ -235,7 +278,7 @@ public class PlanSearchService {
             for (JsonNode hit : hits) {
                 Map<String, Object> entry = new LinkedHashMap<>();
                 entry.put("childId", hit.path("_id").asText());
-                entry.put("source",  objectMapper.convertValue(
+                entry.put("source", objectMapper.convertValue(
                         hit.path("_source"), Map.class));
                 children.add(entry);
             }
@@ -243,7 +286,7 @@ public class PlanSearchService {
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("parentId", parentId);
-        response.put("count",    children.size());
+        response.put("count", children.size());
         response.put("children", children);
         return response;
     }

@@ -15,23 +15,22 @@ import java.util.Map;
 /**
  * REST search endpoints backed by Elasticsearch parent-child join queries.
  *
- * All endpoints require a valid Google Bearer token (authenticated via
- * SecurityConfig — same rule as /api/v1/plan/**).
- *
- * Indexing is asynchronous: documents are indexed by IndexWorker after
- * the API writes to Redis. Search results reflect the Elasticsearch state
- * at query time, which may lag behind KV store by ~1 s after a write.
+ * All endpoints require a valid Google Bearer token.
  *
  * Endpoints:
  *
+ *   GET /api/v1/search/all
+ *     match_all query — returns every indexed document with total count.
+ *     Shows both parents and children with their type labels.
+ *     Primary demo tool for verifying document count after POST/PATCH/DELETE.
+ *
  *   GET /api/v1/search
- *     Search parent (plan) documents, optionally filtered by child properties.
- *     Uses a has_child query so parents are returned only when a matching
- *     child exists.
+ *     has_child query — find parents by child field/value.
+ *     Supports range queries via childOp param (gt, gte, lt, lte).
+ *     Example: ?childField=copay&childOp=gt&childValue=100
  *
  *   GET /api/v1/search/parent/{parentId}/children
- *     Return all child documents belonging to a given parent.
- *     Uses a has_parent query with routing=parentId for correctness.
+ *     has_parent query — return all children for a given parent.
  */
 @RestController
 @RequestMapping("/api/v1/search")
@@ -46,25 +45,53 @@ public class SearchController {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // GET /api/v1/search/all
+    //
+    // match_all query — returns total indexed document count + all documents.
+    // This is the primary endpoint for demo visibility:
+    //   POST → count increases (1 parent + N children)
+    //   PATCH → count stays same (updates in place)
+    //   DELETE → count drops to 0
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @GetMapping(value = "/all", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> searchAll(HttpServletRequest request) {
+        log.info("[DEMO] GET /api/v1/search/all — match_all for total document count");
+        try {
+            Map<String, Object> result = searchService.searchAll();
+            log.info("[DEMO] search/all → {} total documents", result.get("totalDocuments"));
+            return ResponseEntity.ok(result);
+        } catch (Exception ex) {
+            log.warn("[DEMO] GET /api/v1/search/all failed — {}", ex.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new ApiError(
+                    500, "Internal Server Error",
+                    "Search query failed — Elasticsearch may be unavailable",
+                    request.getRequestURI()
+            ));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // GET /api/v1/search
     //
     // Query params (all optional):
-    //   q           — free-text match applied to the parent document itself
+    //   q           — free-text match on the parent document
     //   childField  — field name on a child document to filter by
-    //   childValue  — value to match for childField (uses term + match)
-    //
-    // When childField + childValue are provided, only parents that have at
-    // least one child matching that criterion are returned (has_child query).
-    // When omitted, all indexed parents are returned (match_all on has_child).
+    //   childValue  — value to match for childField
+    //   childOp     — range operator: gt, gte, lt, lte
+    //                  When provided with childField+childValue, uses a range
+    //                  query instead of term match.
+    //                  Example: ?childField=copay&childOp=gt&childValue=100
     // ─────────────────────────────────────────────────────────────────────────
+
     @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> searchParents(
             @RequestParam(required = false) String q,
             @RequestParam(required = false) String childField,
             @RequestParam(required = false) String childValue,
+            @RequestParam(required = false) String childOp,
             HttpServletRequest request
     ) {
-        // Validate: childField and childValue must be provided together
         boolean hasField = childField != null && !childField.isBlank();
         boolean hasValue = childValue != null && !childValue.isBlank();
         if (hasField != hasValue) {
@@ -75,14 +102,25 @@ public class SearchController {
             ));
         }
 
+        // Validate childOp if provided
+        if (childOp != null && !childOp.isBlank()) {
+            if (!childOp.matches("^(gt|gte|lt|lte)$")) {
+                return ResponseEntity.badRequest().body(new ApiError(
+                        400, "Bad Request",
+                        "childOp must be one of: gt, gte, lt, lte",
+                        request.getRequestURI()
+                ));
+            }
+        }
+
         try {
             Map<String, Object> result =
-                    searchService.searchParentsByChildField(childField, childValue, q);
-            log.info("GET /api/v1/search childField={} childValue={} q={} → {} results",
-                    childField, childValue, q, result.get("count"));
+                    searchService.searchParentsByChildField(childField, childValue, childOp, q);
+            log.info("[DEMO] GET /api/v1/search childField={} childOp={} childValue={} q={} → {} results",
+                    childField, childOp, childValue, q, result.get("count"));
             return ResponseEntity.ok(result);
         } catch (Exception ex) {
-            log.warn("GET /api/v1/search failed — {}", ex.getMessage());
+            log.warn("[DEMO] GET /api/v1/search failed — {}", ex.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new ApiError(
                     500, "Internal Server Error",
                     "Search query failed — Elasticsearch may be unavailable",
@@ -94,9 +132,7 @@ public class SearchController {
     // ─────────────────────────────────────────────────────────────────────────
     // GET /api/v1/search/parent/{parentId}/children
     //
-    // Returns all child documents for the given parentId.
-    // Returns an empty children array (count=0) if none exist — not a 404.
-    // Uses has_parent query with routing=parentId for shard targeting.
+    // has_parent query — returns all child documents for a given parent.
     // ─────────────────────────────────────────────────────────────────────────
     @GetMapping(value = "/parent/{parentId}/children",
                 produces = MediaType.APPLICATION_JSON_VALUE)
@@ -106,11 +142,12 @@ public class SearchController {
     ) {
         try {
             Map<String, Object> result = searchService.findChildrenByParent(parentId);
-            log.info("GET /api/v1/search/parent/{}/children → {} children",
+
+            log.info("[DEMO] GET /api/v1/search/parent/{}/children → {} children",
                     parentId, result.get("count"));
             return ResponseEntity.ok(result);
         } catch (Exception ex) {
-            log.warn("GET /api/v1/search/parent/{}/children failed — {}", parentId, ex.getMessage());
+            log.warn("[DEMO] GET /api/v1/search/parent/{}/children failed — {}", parentId, ex.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new ApiError(
                     500, "Internal Server Error",
                     "Search query failed — Elasticsearch may be unavailable",

@@ -1,194 +1,191 @@
 {
   "info": {
-    "name": "SchemaGuard CRUD",
-    "_postman_id": "schemaguard-crud-v1",
-    "description": "Full CRUD collection for SchemaGuard insurance plan API.\nCovers POST, GET, PUT (replace), PATCH (JSON Merge Patch), and DELETE.",
+    "name": "SchemaGuard Demo 3",
+    "_postman_id": "schemaguard-demo3-v1",
+    "description": "Demo 3 walkthrough: CRUD + Queue + ES Parent-Child + Search.\nRun requests top-to-bottom. Bearer token auto-captured from variable.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    {
-      "key": "baseUrl",
-      "value": "http://localhost:8080",
-      "type": "string"
-    },
-    {
-      "key": "objectId",
-      "value": "12xvxc345ssdsds-508",
-      "type": "string"
-    }
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "objectId", "value": "12xvxc345ssdsds-508", "type": "string" },
+    { "key": "token", "value": "PASTE_YOUR_GOOGLE_TOKEN_HERE", "type": "string" },
+    { "key": "etag", "value": "", "type": "string" }
   ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [ { "key": "token", "value": "{{token}}", "type": "string" } ]
+  },
   "item": [
     {
-      "name": "POST - Create Plan",
+      "name": "1. POST - Create Plan (1 parent + 2 children)",
       "request": {
         "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/v1/plan",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "v1", "plan"]
-        },
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "url": { "raw": "{{baseUrl}}/api/v1/plan", "host": ["{{baseUrl}}"], "path": ["api","v1","plan"] },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"planCostShares\": {\n    \"deductible\": 2000,\n    \"_org\": \"example.com\",\n    \"copay\": 23,\n    \"objectId\": \"1234vxc2324sdf-501\",\n    \"objectType\": \"membercostshare\"\n  },\n  \"linkedPlanServices\": [\n    {\n      \"linkedService\": {\n        \"_org\": \"example.com\",\n        \"objectId\": \"1234520xvc30asdf-502\",\n        \"objectType\": \"service\",\n        \"name\": \"Yearly physical\"\n      },\n      \"planserviceCostShares\": {\n        \"deductible\": 10,\n        \"_org\": \"example.com\",\n        \"copay\": 0,\n        \"objectId\": \"1234512xvc1314asdfs-503\",\n        \"objectType\": \"membercostshare\"\n      },\n      \"_org\": \"example.com\",\n      \"objectId\": \"27283xvx9asdff-504\",\n      \"objectType\": \"planservice\"\n    }\n  ],\n  \"_org\": \"example.com\",\n  \"objectId\": \"12xvxc345ssdsds-508\",\n  \"objectType\": \"plan\",\n  \"planType\": \"inNetwork\",\n  \"creationDate\": \"12-12-2017\"\n}"
+          "raw": "{\n  \"planCostShares\": {\n    \"deductible\": 2000,\n    \"_org\": \"example.com\",\n    \"copay\": 23,\n    \"objectId\": \"1234vxc2324sdf-501\",\n    \"objectType\": \"membercostshare\"\n  },\n  \"linkedPlanServices\": [\n    {\n      \"linkedService\": {\n        \"_org\": \"example.com\",\n        \"objectId\": \"1234520xvc30asdf-502\",\n        \"objectType\": \"service\",\n        \"name\": \"Yearly physical\"\n      },\n      \"planserviceCostShares\": {\n        \"deductible\": 10,\n        \"_org\": \"example.com\",\n        \"copay\": 0,\n        \"objectId\": \"1234512xvc1314asdfs-503\",\n        \"objectType\": \"membercostshare\"\n      },\n      \"_org\": \"example.com\",\n      \"objectId\": \"27283xvx9asdff-504\",\n      \"objectType\": \"planservice\"\n    },\n    {\n      \"linkedService\": {\n        \"_org\": \"example.com\",\n        \"objectId\": \"1234520xvc30sfs-505\",\n        \"objectType\": \"service\",\n        \"name\": \"well baby\"\n      },\n      \"planserviceCostShares\": {\n        \"deductible\": 10,\n        \"_org\": \"example.com\",\n        \"copay\": 175,\n        \"objectId\": \"1234512xvc1314sdfsd-506\",\n        \"objectType\": \"membercostshare\"\n      },\n      \"_org\": \"example.com\",\n      \"objectId\": \"27283xvx9sdf-507\",\n      \"objectType\": \"planservice\"\n    }\n  ],\n  \"_org\": \"example.com\",\n  \"objectId\": \"12xvxc345ssdsds-508\",\n  \"objectType\": \"plan\",\n  \"planType\": \"inNetwork\",\n  \"creationDate\": \"12-12-2017\"\n}"
         }
       },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "pm.test('Status is 201', () => pm.response.to.have.status(201));",
-              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
-              "const json = pm.response.json();",
-              "pm.collectionVariables.set('etag', json.etag);"
-            ]
-          }
-        }
-      ]
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 201', () => pm.response.to.have.status(201));",
+        "pm.test('ETag present', () => pm.response.to.have.header('ETag'));",
+        "pm.collectionVariables.set('etag', pm.response.json().etag);"
+      ]}}]
     },
     {
-      "name": "GET - Retrieve Plan",
+      "name": "2. SEARCH ALL - Verify 3 docs indexed (match_all)",
       "request": {
         "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "v1", "plan", "{{objectId}}"]
-        }
+        "url": { "raw": "{{baseUrl}}/api/v1/search/all", "host": ["{{baseUrl}}"], "path": ["api","v1","search","all"] }
       },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
-              "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
-            ]
-          }
-        }
-      ]
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('3 total docs (1 parent + 2 children)', () => {",
+        "  pm.expect(pm.response.json().totalDocuments).to.eql(3);",
+        "});"
+      ]}}]
     },
     {
-      "name": "GET - Conditional GET (304 if unchanged)",
+      "name": "3. SEARCH - Children by parent (has_parent)",
       "request": {
         "method": "GET",
-        "header": [
-          { "key": "If-None-Match", "value": "{{etag}}" }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "v1", "plan", "{{objectId}}"]
-        }
+        "url": { "raw": "{{baseUrl}}/api/v1/search/parent/{{objectId}}/children", "host": ["{{baseUrl}}"], "path": ["api","v1","search","parent","{{objectId}}","children"] }
       },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "pm.test('Status is 304 Not Modified', () => pm.response.to.have.status(304));"
-            ]
-          }
-        }
-      ]
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('2 children', () => pm.expect(pm.response.json().count).to.eql(2));"
+      ]}}]
     },
     {
-      "name": "PUT - Replace Plan",
+      "name": "4. SEARCH - Parent by child copay (has_child term)",
       "request": {
-        "method": "PUT",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "v1", "plan", "{{objectId}}"]
-        },
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"planCostShares\": {\n    \"deductible\": 3000,\n    \"_org\": \"example.com\",\n    \"copay\": 50,\n    \"objectId\": \"1234vxc2324sdf-501\",\n    \"objectType\": \"membercostshare\"\n  },\n  \"linkedPlanServices\": [\n    {\n      \"linkedService\": {\n        \"_org\": \"example.com\",\n        \"objectId\": \"1234520xvc30asdf-502\",\n        \"objectType\": \"service\",\n        \"name\": \"Annual checkup\"\n      },\n      \"planserviceCostShares\": {\n        \"deductible\": 20,\n        \"_org\": \"example.com\",\n        \"copay\": 10,\n        \"objectId\": \"1234512xvc1314asdfs-503\",\n        \"objectType\": \"membercostshare\"\n      },\n      \"_org\": \"example.com\",\n      \"objectId\": \"27283xvx9asdff-504\",\n      \"objectType\": \"planservice\"\n    }\n  ],\n  \"_org\": \"example.com\",\n  \"objectId\": \"12xvxc345ssdsds-508\",\n  \"objectType\": \"plan\",\n  \"planType\": \"outOfNetwork\",\n  \"creationDate\": \"01-01-2025\"\n}"
-        }
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/search?childField=planserviceCostShares.copay&childValue=175", "host": ["{{baseUrl}}"], "path": ["api","v1","search"], "query": [{"key":"childField","value":"planserviceCostShares.copay"},{"key":"childValue","value":"175"}] }
       },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
-              "const json = pm.response.json();",
-              "pm.collectionVariables.set('etag', json.etag);"
-            ]
-          }
-        }
-      ]
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('Found parent', () => pm.expect(pm.response.json().count).to.be.above(0));"
+      ]}}]
     },
     {
-      "name": "PATCH - Merge Patch Plan",
+      "name": "5. SEARCH - Parent by child copay > 100 (has_child range)",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/search?childField=planserviceCostShares.copay&childOp=gt&childValue=100", "host": ["{{baseUrl}}"], "path": ["api","v1","search"], "query": [{"key":"childField","value":"planserviceCostShares.copay"},{"key":"childOp","value":"gt"},{"key":"childValue","value":"100"}] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('Found parent with copay > 100', () => pm.expect(pm.response.json().count).to.be.above(0));"
+      ]}}]
+    },
+    {
+      "name": "6. GET - Retrieve Plan",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","plan","{{objectId}}"] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
+      ]}}]
+    },
+    {
+      "name": "7. GET - Conditional Read 304",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "If-None-Match", "value": "{{etag}}" } ],
+        "url": { "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","plan","{{objectId}}"] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 304', () => pm.response.to.have.status(304));"
+      ]}}]
+    },
+    {
+      "name": "8. PATCH - Change child copay (patch → index demo)",
       "request": {
         "method": "PATCH",
-        "header": [
-          { "key": "Content-Type", "value": "application/merge-patch+json" }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "v1", "plan", "{{objectId}}"]
-        },
+        "header": [ { "key": "Content-Type", "value": "application/merge-patch+json" } ],
+        "url": { "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","plan","{{objectId}}"] },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"planType\": \"outOfNetwork\",\n  \"planCostShares\": {\n    \"copay\": 50\n  }\n}"
+          "raw": "{\n  \"linkedPlanServices\": [\n    {\n      \"linkedService\": { \"_org\": \"example.com\", \"objectId\": \"1234520xvc30asdf-502\", \"objectType\": \"service\", \"name\": \"Yearly physical\" },\n      \"planserviceCostShares\": { \"deductible\": 10, \"_org\": \"example.com\", \"copay\": 50, \"objectId\": \"1234512xvc1314asdfs-503\", \"objectType\": \"membercostshare\" },\n      \"_org\": \"example.com\", \"objectId\": \"27283xvx9asdff-504\", \"objectType\": \"planservice\"\n    },\n    {\n      \"linkedService\": { \"_org\": \"example.com\", \"objectId\": \"1234520xvc30sfs-505\", \"objectType\": \"service\", \"name\": \"well baby\" },\n      \"planserviceCostShares\": { \"deductible\": 10, \"_org\": \"example.com\", \"copay\": 175, \"objectId\": \"1234512xvc1314sdfsd-506\", \"objectType\": \"membercostshare\" },\n      \"_org\": \"example.com\", \"objectId\": \"27283xvx9sdf-507\", \"objectType\": \"planservice\"\n    }\n  ]\n}"
         }
       },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('ETag header present', () => pm.response.to.have.header('ETag'));",
-              "pm.test('planType updated', () => {",
-              "  const json = pm.response.json();",
-              "  pm.expect(json.planType).to.eql('outOfNetwork');",
-              "});",
-              "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
-            ]
-          }
-        }
-      ]
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('ETag changed', () => pm.response.to.have.header('ETag'));",
+        "pm.collectionVariables.set('etag', pm.response.headers.get('ETag'));"
+      ]}}]
     },
     {
-      "name": "DELETE - Delete Plan",
+      "name": "9. SEARCH ALL - Verify count still 3 after PATCH",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/search/all", "host": ["{{baseUrl}}"], "path": ["api","v1","search","all"] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('Still 3 docs (PATCH updates in-place)', () => {",
+        "  pm.expect(pm.response.json().totalDocuments).to.eql(3);",
+        "});"
+      ]}}]
+    },
+    {
+      "name": "10. SEARCH - Verify patched copay in children",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/search/parent/{{objectId}}/children", "host": ["{{baseUrl}}"], "path": ["api","v1","search","parent","{{objectId}}","children"] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('2 children returned', () => pm.expect(pm.response.json().count).to.eql(2));"
+      ]}}]
+    },
+    {
+      "name": "11. LIST ALL - Plans in KV store",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/plan", "host": ["{{baseUrl}}"], "path": ["api","v1","plan"] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('1 plan in KV', () => pm.expect(pm.response.json().count).to.eql(1));"
+      ]}}]
+    },
+    {
+      "name": "12. DELETE - Cascaded delete (KV + ES)",
       "request": {
         "method": "DELETE",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "v1", "plan", "{{objectId}}"]
-        }
+        "url": { "raw": "{{baseUrl}}/api/v1/plan/{{objectId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","plan","{{objectId}}"] }
       },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "pm.test('Status is 204 No Content', () => pm.response.to.have.status(204));"
-            ]
-          }
-        }
-      ]
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 204', () => pm.response.to.have.status(204));"
+      ]}}]
+    },
+    {
+      "name": "13. SEARCH ALL - Verify 0 docs after DELETE",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/search/all", "host": ["{{baseUrl}}"], "path": ["api","v1","search","all"] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('0 docs — cascaded delete worked', () => {",
+        "  pm.expect(pm.response.json().totalDocuments).to.eql(0);",
+        "});"
+      ]}}]
+    },
+    {
+      "name": "14. LIST ALL - KV store also empty",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/api/v1/plan", "host": ["{{baseUrl}}"], "path": ["api","v1","plan"] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Status 200', () => pm.response.to.have.status(200));",
+        "pm.test('0 plans in KV', () => pm.expect(pm.response.json().count).to.eql(0));"
+      ]}}]
     }
   ]
 }

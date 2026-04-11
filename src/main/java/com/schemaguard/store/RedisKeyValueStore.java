@@ -7,7 +7,10 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 @Component
 @Profile("redis")
@@ -67,5 +70,18 @@ public class RedisKeyValueStore implements KeyValueStore {
         String key = KEY_PREFIX + objectId;
         Boolean exists = redisTemplate.hasKey(key);
         return Boolean.TRUE.equals(exists);
+    }
+
+    @Override
+    public List<String> keys() {
+        Set<String> rawKeys = redisTemplate.keys(KEY_PREFIX + "*");
+        if (rawKeys == null || rawKeys.isEmpty()) {
+            return List.of();
+        }
+        List<String> objectIds = new ArrayList<>();
+        for (String key : rawKeys) {
+            objectIds.add(key.substring(KEY_PREFIX.length()));
+        }
+        return objectIds;
     }
 }

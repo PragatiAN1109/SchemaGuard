@@ -7,6 +7,8 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -48,5 +50,10 @@ public class InMemoryKeyValueStore implements KeyValueStore {
     @Override
     public boolean exists(String objectId) {
         return map.containsKey(objectId);
+    }
+
+    @Override
+    public List<String> keys() {
+        return new ArrayList<>(map.keySet());
     }
 }

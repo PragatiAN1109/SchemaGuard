@@ -11,7 +11,7 @@
     <groupId>com</groupId>
     <artifactId>SchemaGuard</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <n>SchemaGuard</n>
+    <name>SchemaGuard</name>
     <description>SchemaGuard</description>
     <url/>
     <licenses>
@@ -65,10 +65,16 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Redis support -->
+        <!-- Redis support (KV store only — no longer used for queueing) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- RabbitMQ — event-driven indexing queue (replaces Redis Streams) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
         </dependency>
 
         <!-- Elasticsearch — Java API Client (Spring Boot 4 compatible, RestHighLevelClient removed) -->
