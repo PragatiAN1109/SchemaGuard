@@ -72,7 +72,7 @@ Pings the Elasticsearch cluster root and checks whether `plans-index` exists. Re
 
 ## Search endpoints (`/api/v1/search`)
 
-All search endpoints query Elasticsearch, which lags Redis by however long it takes `RabbitMQIndexListener` to process the corresponding event (typically well under a second, but not bounded).
+All search endpoints query Elasticsearch, which lags Redis by however long it takes `RabbitMQIndexListener` to process the corresponding event. The implementation does not define or measure a maximum indexing delay — there is no benchmark backing a specific number. The demo runbook's `sleep 1` waits are a practical convenience for a local, idle stack, not a guaranteed bound.
 
 ### `GET /api/v1/search/all`
 `match_all` query returning every indexed document (parents and children) with a total count. Useful for confirming index state directly (e.g., count goes up after `POST`, stays flat after `PATCH`, drops to 0 after `DELETE`).

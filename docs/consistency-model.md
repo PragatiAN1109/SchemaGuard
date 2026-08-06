@@ -7,7 +7,8 @@
 3. **`If-Match` validation (`PUT`, `PATCH`, `DELETE`)** — if the header is present, `PlanController` strips its surrounding quotes and compares it to the current Redis ETag. A mismatch throws `PreconditionFailedException` → `412 Precondition Failed`. **The header is optional** — a request with no `If-Match` is not rejected; it always applies against the current state.
 4. **`If-None-Match` handling (`GET`)** — if present and it matches the current ETag (quotes stripped), the API returns `304 Not Modified` with no body.
 5. **How the async consumer uses the ETag** — every successful write publishes an `IndexEvent` carrying the *new* ETag produced by that write. `RabbitMQIndexListener` never trusts the event's own document data; it re-fetches the current document from Redis and compares `event.etag()` to the freshly-read `etag`.
-6. **How stale events are detected and skipped** — if the two ETags differ, a newer write has already superseded the event. The listener logs the skip and returns without indexing (no error, no retry — this is treated as expected behavior, not a failure). `DELETE` events are the exception: they carry no version check because delete is idempotent (indexing an already-absent document is a no-op).
+6. **How stale UPSERT/PATCH events are detected and skipped** — if the two ETags differ, a newer write has already superseded the event. The listener logs the skip and returns without indexing (no error, no retry — this is treated as expected behavior, not a failure).
+7. **How stale `DELETE` events are detected and skipped** — a `DELETE` event carries the ETag captured *before* deletion, which can't be compared against a "current" ETag because Redis no longer has an entry for that id. Instead, the listener checks `KeyValueStore.exists(documentId)` right before deleting from Elasticsearch. If Redis now has a document for that id, an object was created (or recreated) with the same `objectId` after this `DELETE` was published, and the event is stale — it's skipped so it doesn't remove Elasticsearch entries that reflect the newer, live Redis state. If Redis has no such document, the delete proceeds: children first, then the parent.
 
 ## Why this matters
 
@@ -37,11 +38,32 @@ Client                  API (Redis)                RabbitMQIndexListener        
   │                          │          v2 = v2 → index ─►│── index v2 ───────►│
 ```
 
+### The DELETE case: recreated objectId
+
+A delayed `DELETE` event poses a similar risk, but ETag comparison doesn't work here — once Redis has deleted the entry, there's no "current ETag" left to compare the event against. Instead the listener asks a different question: *does Redis have a document for this id right now?*
+
+```
+Client                  API (Redis)                RabbitMQIndexListener        Elasticsearch
+  │                          │                           │                    │
+  ├─ DELETE plan A ─────────►│ Redis: delete(A)          │                    │
+  │                          │ publish DELETE(A) ───╮    │                    │
+  │◄─ 204 ───────────────────│                       │    │                    │
+  │                          │      (event delayed — poison message, outage) │
+  ├─ POST plan A (new) ─────►│ Redis: create(A)          │                    │
+  │◄─ 201 ───────────────────│ publish UPSERT(A) ───────►│                    │
+  │                          │                           │ exists(A)? yes ───►│ index new A
+  │                          │           DELETE(A) ──────╯                    │
+  │                          │           exists(A)? yes → SKIP (stale)        │
+```
+
+Without the `exists()` check, that delayed `DELETE` would run `deleteChildren`/`deleteParent` on the id right after the new plan was indexed — silently erasing a document that Redis still has and considers current. This is covered by `RabbitMQIndexListenerTest#staleDeleteAfterRecreationDoesNotDeleteNewDocument`.
+
 ## What this does and does not guarantee
 
 | Claim | Accurate? |
 |-------|-----------|
 | A queued event carrying an older ETag will not overwrite a document already updated to a newer ETag | Yes — verified by `RabbitMQIndexListenerTest` |
+| A delayed `DELETE` event cannot remove a plan that was recreated under the same `objectId` after the delete | Yes — verified by `RabbitMQIndexListenerTest#staleDeleteAfterRecreationDoesNotDeleteNewDocument` |
 | Elasticsearch is eventually consistent with Redis, provided the write's event is successfully published and consumed | Yes, with the caveat below |
 | Elasticsearch can never contain data that was never committed to Redis | Yes — the listener only ever indexes what it reads from Redis, never the event payload itself |
 | Every write is guaranteed to eventually reach Elasticsearch | **No.** If RabbitMQ is unreachable when a write commits, `RabbitMQEventPublisher` catches the exception, logs it, and the event is lost — see [failure-handling.md](failure-handling.md) |

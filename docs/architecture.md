@@ -39,6 +39,8 @@ flowchart LR
 
 The listener does not trust the event payload's document content — it only uses the event to know *which* document changed, then re-reads the current state from Redis before indexing. See [consistency-model.md](consistency-model.md) for why.
 
+`DELETE` events use a different guard than the diagram above: there's no "current etag" left in Redis to compare against once the document is gone, so the listener instead checks whether Redis has *any* document for that id. A document present means the id was recreated after this delete was published, so the delete is stale and is skipped rather than erasing the newer document's index entries.
+
 ## Parent-child indexing
 
 `PlanDocumentSplitter` extracts each entry of the plan's `linkedPlanServices` array as a child document; everything else (including `planCostShares`) stays embedded in the parent document and is searchable only through Elasticsearch's dynamic field mapping.
