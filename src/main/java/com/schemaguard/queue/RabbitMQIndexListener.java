@@ -26,9 +26,18 @@ import static com.schemaguard.config.RabbitMQConfig.QUEUE_NAME;
  *   PATCH  → re-index parent + all children (count unchanged)
  *   DELETE → delete children first, then parent (cascaded)
  *
- * Stale-event guard: if the event etag no longer matches the
- * current KV etag, a newer write has superseded this event and
- * we skip indexing.
+ * Stale-event guard (UPSERT / PATCH): if the event etag no longer
+ * matches the current KV etag, a newer write has superseded this
+ * event and we skip indexing.
+ *
+ * Stale-event guard (DELETE): a DELETE event carries no etag to
+ * compare against post-deletion, so staleness is detected differently —
+ * by checking whether the KV store currently holds a document for this
+ * id. If it does, a new object was created (or recreated) with the same
+ * objectId after this DELETE was published, and removing it from
+ * Elasticsearch now would incorrectly delete a document that reflects
+ * live Redis state. The event is skipped in that case. If no document
+ * exists, the DELETE proceeds as normal.
  *
  * Spring AMQP auto-ack: if the listener returns normally the
  * message is acknowledged. If it throws, the message is nacked
@@ -142,6 +151,15 @@ public class RabbitMQIndexListener {
     // DELETE — cascaded removal (children first, then parent)
     // ─────────────────────────────────────────────────────────
     private void handleDelete(String documentId) {
+        // Stale-event guard: if the KV store has a document for this id right now,
+        // it was (re)created after this DELETE was published — the delete is stale
+        // and must not remove the newer document's Elasticsearch entries.
+        if (kvStore.exists(documentId)) {
+            log.info("[DEMO] RABBITMQ skipping stale DELETE for id={} — a document with this id currently exists in KV (likely recreated after this event was published)",
+                    documentId);
+            return;
+        }
+
         log.info("[DEMO] RABBITMQ processing DELETE id={} — cascading removal from ES", documentId);
 
         // Step 1: delete all child documents first
