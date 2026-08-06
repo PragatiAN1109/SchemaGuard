@@ -1,824 +1,192 @@
 # SchemaGuard
 
-A Spring Boot REST API service for managing healthcare insurance plans with JSON Schema validation, ETag caching, Redis persistent storage, Elasticsearch parent-child indexing, RabbitMQ event-driven indexing, and Google OAuth2 JWT security.
+[![CI](https://github.com/PragatiAN1109/SchemaGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/PragatiAN1109/SchemaGuard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Java 17](https://img.shields.io/badge/Java-17-orange.svg)](pom.xml)
 
-## overview
+SchemaGuard is a Spring Boot backend that validates and manages nested healthcare-plan documents while maintaining an authoritative Redis-backed store and a searchable Elasticsearch index. Writes are validated against a JSON Schema and protected by ETag-based optimistic concurrency; Elasticsearch is updated asynchronously via RabbitMQ, and an event-version check prevents a delayed queued event from overwriting state that has already moved on.
 
-SchemaGuard is a RESTful web service that provides full CRUD operations for healthcare insurance plan data. It enforces strict JSON Schema validation, supports conditional GET/PUT/PATCH/DELETE using ETags, implements JSON Merge Patch (RFC 7396), and secures all plan endpoints using Google RS256 Bearer tokens.
+## Problem being solved
 
-## features
+Nested documents (a healthcare plan with linked services and cost shares) need to be:
+1. Structurally validated before they're accepted,
+2. Safe to update concurrently without silently clobbering someone else's write, and
+3. Searchable by fields on both the top-level plan and its nested child records — without making every read pay the cost of a full-document Elasticsearch reindex on every write.
 
-- JSON Schema validation for all incoming plan data (POST, PUT, PATCH)
-- full CRUD: POST, GET, PUT (replace), PATCH (JSON Merge Patch), DELETE
-- ETag support for conditional requests (SHA-256 based)
-- **Google OAuth2 RS256 JWT security — all `/api/v1/plan/**` endpoints require a valid Bearer token**
-- **public endpoint: `GET /api/v1/schema/plan` — no auth required**
-- **standardized error contract — every error returns the same JSON shape**
-- Redis as primary KV store — data persists across app restarts
-- **RabbitMQ event-driven indexing — UPSERT/PATCH/DELETE events published on every successful write**
-- **RabbitMQIndexListener — consumer that processes events and syncs Elasticsearch**
-- Elasticsearch parent-child index — `plans-index` with join mapping
-- `IndexService` abstraction — clean interface for all ES index operations
-- Docker Compose for one-command demo startup
+SchemaGuard separates these concerns: Redis is the single authoritative store and the only thing the API writes to synchronously; Elasticsearch is a derived, searchable index kept in sync asynchronously, and is treated as replaceable at any time by re-processing events.
 
-## Spring profile → storage + security mapping
+## Key capabilities
 
-| Profile | Storage Backend | Security |
-|---------|----------------|----------|
-| `redis` (default) | `RedisKeyValueStore` | Google JWT enforced |
-| `test` | `InMemoryKeyValueStore` | security auto-config excluded |
+- **JSON Schema validation** (draft 2020-12) on `POST`, `PUT`, and `PATCH`, using the exact schema also exposed at `GET /api/v1/schema/plan`.
+- **Full CRUD** — `POST`, `GET` (with `If-None-Match` support), `PUT` (full replace), `PATCH` (JSON Merge Patch, RFC 7396), `DELETE` — all against Redis.
+- **ETag-based optimistic concurrency** — SHA-256 ETags, optional `If-Match` precondition on writes, `304`/`412` handled per HTTP semantics.
+- **Event-driven Elasticsearch indexing** — every successful write publishes an event to RabbitMQ; a single consumer re-indexes Elasticsearch by re-reading the current Redis state, never the event payload.
+- **Stale-event rejection** — the consumer compares the event's ETag to the current Redis ETag and skips indexing if a newer write has already superseded it.
+- **Elasticsearch parent-child search** — `has_child`/`has_parent`/`parent_id` queries exposed as REST endpoints, with cascaded deletion of children before parent.
+- **Google OAuth2 (RS256) JWT security** on plan and search endpoints; schema and health endpoints are public.
+- **Standardized error contract** — every error response has the same JSON shape.
+- **One-command local stack** via Docker Compose (Redis, RabbitMQ, Elasticsearch, the app).
 
----
+## Architecture
 
-## starting the full stack
+```mermaid
+flowchart LR
+    Client -->|Bearer JWT| API[Spring Boot REST API]
+    API -->|validate| JWT[Google JWKS<br/>RS256]
+    API -->|validate| Schema[JSON Schema<br/>draft 2020-12]
+    API <-->|read/write| Redis[(Redis<br/>authoritative store)]
+    API -.->|publish event<br/>fire-and-forget| Exchange{{RabbitMQ<br/>schemaguard.index.exchange}}
+    Exchange -.-> Queue[[schemaguard.index.queue]]
+    Queue -.->|async| Listener[RabbitMQIndexListener]
+    Listener -->|re-fetch by id| Redis
+    Listener -->|etag guard, then index| ES[(Elasticsearch<br/>plans-index, parent-child)]
+```
+
+Solid arrows are synchronous (part of the HTTP request); dashed arrows are asynchronous and happen after the response has already been returned. Full component breakdown and the parent-child indexing model: [docs/architecture.md](docs/architecture.md).
+
+## Request and event flow
+
+1. Client sends a request with a Bearer token.
+2. Spring Security validates the JWT against Google's JWKS.
+3. For writes, the body is validated against the plan JSON Schema.
+4. ETag preconditions (`If-Match`/`If-None-Match`) are checked against the current Redis state.
+5. Redis is read or written. The HTTP response is returned here — indexing has not happened yet.
+6. On a successful write, an `IndexEvent` (operation, documentId, new etag, timestamp) is published to RabbitMQ — fire-and-forget; the response does not wait on this.
+7. `RabbitMQIndexListener` consumes the event, re-fetches the current document from Redis, compares the event's etag to the current one, and — if they still match — indexes the parent and its children into Elasticsearch. If a newer write has already superseded the event, it's skipped.
+
+Full sequence and the reasoning behind re-fetching from Redis instead of trusting the event payload: [docs/consistency-model.md](docs/consistency-model.md).
+
+## Key engineering decisions
+
+| Decision | Why |
+|----------|-----|
+| Redis is the single authoritative store; Elasticsearch is derived | Lets Elasticsearch be treated as rebuildable/replaceable without risking data loss — worst case, a document is stale until its next write. |
+| The consumer re-fetches from Redis rather than indexing the event payload | Makes indexing idempotent under redelivery and immune to processing events out of order — the last-processed event always ends up reflecting the current Redis state, not whatever data it happened to carry. |
+| ETag comparison at consume-time, not at publish-time | The event is published synchronously with the write, but may be processed much later — checking staleness right before indexing is what actually prevents an old snapshot from overwriting a newer one. |
+| Fire-and-forget publish (no outbox, no publisher confirms) | Kept the write path simple for this project's scope, at the explicit cost of a dual-write gap — documented in [Consistency and failure model](#consistency-and-failure-model) rather than hidden. |
+| Elasticsearch writes/deletes are idempotent upserts and no-op-on-absent | Lets a redelivered message be safely reprocessed without special-casing "already applied." |
+
+## Quick start
 
 ```bash
 export GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
 docker compose up --build
 ```
 
-Starts three services: **Redis** (6379), **Elasticsearch** (9200), **app** (8080).
+This starts **four services**: Redis (`6379`), RabbitMQ (`5672`, management UI on `15672`), Elasticsearch (`9200`), and the app (`8080`). The app waits for all three infrastructure services to report healthy before starting.
 
-Expected startup logs:
-```
-RabbitMQIndexListener listening on queue 'schemaguard.index.queue'
-Elasticsearch index 'plans-index' initialized with parent-child mapping
-Started SchemaGuardApplication
-```
+You'll need a Google ID token to call protected endpoints — see [Getting a Google ID token](docs/local-development.md#getting-a-google-id-token). Full environment variable reference and running without Docker: [docs/local-development.md](docs/local-development.md).
 
----
-
-## RabbitMQIndexListener — RabbitMQ consumer
-
-`RabbitMQIndexListener` is a `@RabbitListener` component (active on `redis` profile only) that
-consumes events from the RabbitMQ queue and synchronises Elasticsearch.
-
-### flow
-
-```
-POST /api/v1/plan
-  → KV store (Redis)
-  → publish UPSERT to stream
-  → RabbitMQIndexListener picks up event (within ~1s)
-  → fetches doc from KV store
-  → IndexService.indexParent() + indexChild() per linkedPlanService
-  → Elasticsearch updated
-  → message acknowledged (message removed from PEL)
-```
-
-### parent-child split
-
-| document | ES type | routing |
-|----------|---------|--------|
-| plan (top-level) | parent | own objectId (default) |
-| each `linkedPlanServices` entry | child | parentId (plan objectId) |
-
-The `planCostShares` object and nested cost shares are stored within the parent document
-(searchable via dynamic mapping), not as separate child documents.
-
-### stream / group / consumer config
-
-| config key | env var | default |
-|------------|---------|--------|
-| `spring.rabbitmq.host` | `RABBITMQ_HOST` | `localhost` |
-| `spring.rabbitmq.port` | `RABBITMQ_PORT` | `5672` |
-| `spring.rabbitmq.username` | `RABBITMQ_USER` | `guest` |
-| `spring.rabbitmq.password` | `RABBITMQ_PASS` | `guest` |
-
-### retry strategy
-
-- 3 attempts per message with 250ms / 500ms / 1000ms backoff
-- on success: `message acknowledged` — message removed from PEL
-- on all retries exhausted: **do NOT ACK** — message stays in PEL and is re-delivered on next startup via pending message check
-- app never crashes on indexing failure
-
-### how restarts avoid duplicates
-
-1. **Consumer group + ACK**: each message is only delivered to one consumer at a time
-2. **PEL on failure**: unACKed messages are re-delivered, not lost
-3. **Idempotent operations**: ES upsert and delete are safe to replay — re-processing the same event has no side effects
-
----
-
-## demo runbook — end-to-end
+## Representative API examples
 
 ```bash
 TOKEN="<your Google ID token>"
-```
 
-**step 1 — create a plan:**
-```bash
+# Create a plan (schema-validated)
 curl -X POST http://localhost:8080/api/v1/plan \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d @samples/plan.json
-```
 
-**step 2 — confirm event in stream:**
-```bash
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
-```
-
-**step 3 — confirm worker processed it (all ACKed, PEL empty):**
-```bash
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Ready/Unacked counts
-```
-Expected: empty (all messages ACKed)
-
-**step 4 — confirm parent indexed in Elasticsearch:**
-```bash
-curl "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508"
-```
-Expected: `"found": true` with plan document
-
-**step 5 — confirm children indexed (query by parent_id):**
-```bash
-curl -X GET "http://localhost:9200/plans-index/_search" \
-  -H "Content-Type: application/json" \
-  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}'
-```
-Expected: 2 hits (the two linkedPlanServices entries)
-
-**step 6 — end-to-end PATCH propagation demo (KV → Queue → Elastic):**
-
-> Index: `plans-index` · Stream: `schemaguard.index.queue` · Join field: `my_join_field`
-
-**6a — query Elastic BEFORE the patch (baseline):**
-```bash
-curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
-  | python3 -m json.tool | grep planType
-# Expected: "planType": "inNetwork"
-```
-
-**6b — send the PATCH request (JSON Merge Patch — RFC 7396):**
-```bash
-curl -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Content-Type: application/merge-patch+json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"planType": "outOfNetwork"}'
-```
-Expected: `200 OK` with updated JSON body and new `ETag` header.
-
-App log (visible via `docker logs schemaguard-app`):
-```
-PATCH applied to KV id=12xvxc345ssdsds-508 newEtag=<new-sha256>; published PATCH event
-Processing PATCH event id=12xvxc345ssdsds-508 etag=<new-sha256>
-Fetched latest KV doc id=12xvxc345ssdsds-508; re-indexed into Elastic
-PATCH re-index complete id=12xvxc345ssdsds-508 children=2
-```
-
-**6c — confirm PATCH event in the RabbitMQ queue:**
-```bash
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
-```
-Look for an entry with `operation=PATCH` and `documentId=12xvxc345ssdsds-508`.
-
-**6d — query Elastic AFTER the patch (wait ~1 s for worker):**
-```bash
-sleep 1
-curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
-  | python3 -m json.tool | grep planType
-# Expected: "planType": "outOfNetwork"
-```
-
-**6e — term search to confirm the updated value is queryable:**
-```bash
-curl -s -X GET "http://localhost:9200/plans-index/_search" \
-  -H "Content-Type: application/json" \
-  -d '{"query":{"term":{"planType":"outOfNetwork"}}}' \
-  | python3 -m json.tool | grep -E '"planType"|"objectId"'
-# Expected: 1 hit — objectId=12xvxc345ssdsds-508, planType=outOfNetwork
-```
-
-**step 7 — cascaded delete demo (KV + Elastic parent + Elastic children):**
-
-> Index: `plans-index` · Stream: `schemaguard.index.queue` · Join field: `my_join_field`
-
-**7a — verify parent exists in Elastic BEFORE delete:**
-```bash
-curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
-  | python3 -m json.tool | grep -E '"found"|"objectId"'
-# Expected: "found": true
-```
-
-**7b — verify children exist BEFORE delete:**
-```bash
-curl -s -X GET "http://localhost:9200/plans-index/_search" \
-  -H "Content-Type: application/json" \
-  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}' \
-  | python3 -m json.tool | grep -E '"total"|"value"'
-# Expected: "value": 2  (the two linkedPlanServices entries)
-```
-
-**7c — verify KV has the document BEFORE delete:**
-```bash
-curl -s "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool | grep objectId
-# Expected: "objectId": "12xvxc345ssdsds-508"
-```
-
-**7d — send the DELETE request:**
-```bash
-curl -s -o /dev/null -w "%{http_code}" \
-  -X DELETE "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+# Conditional GET
+curl -si http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Authorization: Bearer $TOKEN"
-# Expected: 204
-```
+# copy the ETag header, then:
+curl -si http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'If-None-Match: "<etag-from-above>"'
+# → 304 Not Modified
 
-App log (visible via `docker logs schemaguard-app`):
-```
-DELETE removed from KV id=12xvxc345ssdsds-508; published DELETE event for cascaded Elastic removal
-Processing DELETE event id=12xvxc345ssdsds-508
-Deleted children for parent id=12xvxc345ssdsds-508
-Deleted parent id=12xvxc345ssdsds-508
-```
-
-**7e — confirm DELETE event in the RabbitMQ queue:**
-```bash
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
-```
-Look for an entry with `operation=DELETE` and `documentId=12xvxc345ssdsds-508`.
-
-**7f — verify KV returns 404 AFTER delete (wait ~1 s):**
-```bash
-sleep 1
-curl -s "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool | grep -E '"status"|"error"'
-# Expected: "status": 404, "error": "Not Found"
-```
-
-**7g — verify parent is gone from Elastic:**
-```bash
-curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
-  | python3 -m json.tool | grep '"found"'
-# Expected: "found": false
-```
-
-**7h — verify all children are gone from Elastic:**
-```bash
-curl -s -X GET "http://localhost:9200/plans-index/_search" \
-  -H "Content-Type: application/json" \
-  -d '{"query":{"parent_id":{"type":"child","id":"12xvxc345ssdsds-508"}}}' \
-  | python3 -m json.tool | grep -E '"total"|"value"'
-# Expected: "value": 0  — all children cascaded-deleted
-```
-
-**7i — confirm no stuck messages in PEL:**
-```bash
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Ready/Unacked counts
-# Expected: empty list
-```
-
-**step 8 — observe worker logs:**
-```bash
-docker logs schemaguard-app | grep -i indexworker
-```
-
-Expected:
-```
-RabbitMQIndexListener listening on queue 'schemaguard.index.queue'
-processing event op=UPSERT id=12xvxc345ssdsds-508 etag=<sha256> msgId=...
-indexed parent id=12xvxc345ssdsds-508 with 2 children
-Processing PATCH event id=12xvxc345ssdsds-508 etag=<new-sha256>
-Fetched latest KV doc id=12xvxc345ssdsds-508; re-indexed into Elastic
-PATCH re-index complete id=12xvxc345ssdsds-508 children=2
-processing event op=DELETE id=12xvxc345ssdsds-508 etag=<sha256> msgId=...
-Processing DELETE event id=12xvxc345ssdsds-508
-Deleted children for parent id=12xvxc345ssdsds-508
-Deleted parent id=12xvxc345ssdsds-508
-```
-
----
-
-## Async consistency model — If-Match and ETag version safety
-
-### Why this matters
-
-Indexing into Elasticsearch happens **asynchronously** via RabbitMQ. Between
-the API returning a `200` and the worker processing the event, another write may
-arrive and produce a newer version. Without a version check, the worker could
-index a stale snapshot and overwrite the correct, newer Elastic state.
-
-### How it works
-
-```
-Client                  API (KV + Redis)            RabbitMQIndexListener         Elasticsearch
-  │                          │                           │                    │
-  ├─ PATCH v1 ──────────────►│ If-Match: etag_v0         │                    │
-  │                          │ ETag check passes          │                    │
-  │                          │ KV → etag_v1               │                    │
-  │                          │ publish event(etag=v1) ───►│                    │
-  │◄─ 200 etag_v1 ───────────│                           │                    │
-  │                          │                           │                    │
-  ├─ PATCH v2 ──────────────►│ If-Match: etag_v1         │                    │
-  │                          │ ETag check passes          │                    │
-  │                          │ KV → etag_v2               │                    │
-  │                          │ publish event(etag=v2) ───►│                    │
-  │◄─ 200 etag_v2 ───────────│                           │                    │
-  │                          │                           │                    │
-  │                          │          event(etag=v1) ──►│                    │
-  │                          │          fetch KV → etag_v2│                    │
-  │                          │          v1 ≠ v2 → SKIP   │                    │
-  │                          │                           │                    │
-  │                          │          event(etag=v2) ──►│                    │
-  │                          │          fetch KV → etag_v2│                    │
-  │                          │          v2 = v2 → INDEX ─►│── index v2 ───────►│
-```
-
-### Rules
-
-| Layer | Behaviour |
-|-------|-----------|
-| **API (PUT / PATCH)** | Validates `If-Match` header against current KV etag → `412` if stale. Event published only after successful KV write. |
-| **Event payload** | Always carries the **new** etag produced by the KV write. |
-| **Worker (UPSERT / PATCH)** | Fetches current KV etag; if `event.etag ≠ currentKV.etag` → logs stale skip, ACKs event, does NOT index. |
-| **Worker (DELETE)** | No version check — delete is idempotent; absent doc in Elastic is silently fine. |
-| **Elasticsearch** | Only ever receives the latest committed KV state. Can never hold a value that is older than what KV currently stores. |
-
-### Worker stale-detection log lines
-
-```
-# Stale event skipped:
-Skipping stale event for id=<id> eventEtag=<old> currentEtag=<new>
-
-# Fresh event indexed:
-Processing event id=<id> eventEtag=<etag>
-Index updated for id=<id> children=<n>
-```
-
----
-
-### Demo — stale event detection
-
-**Prerequisites:** stack running, plan created and indexed.
-
-**1 — Get current etag:**
-```bash
-ETAG=$(curl -si "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Authorization: Bearer $TOKEN" | grep -i ^etag | awk '{print $2}' | tr -d '"\r')
-echo "ETag: $ETAG"
-```
-
-**2 — Apply first PATCH (v1):**
-```bash
-ETAG_V1=$(curl -s -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
+# JSON Merge Patch (RFC 7396) with a concurrency guard
+curl -X PATCH http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508 \
   -H "Content-Type: application/merge-patch+json" \
   -H "Authorization: Bearer $TOKEN" \
-  -H "If-Match: \"$ETAG\"" \
-  -d '{"planType": "outOfNetwork"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('_etag','') or '')" 2>/dev/null)
-# Capture new ETag from response header instead:
-ETAG_V1=$(curl -si -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Content-Type: application/merge-patch+json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "If-Match: \"$ETAG\"" \
-  -d '{"planType": "outOfNetwork"}' | grep -i ^etag | awk '{print $2}' | tr -d '"\r')
-echo "ETag v1: $ETAG_V1"
-```
+  -H 'If-Match: "<current-etag>"' \
+  -d '{"planType": "outOfNetwork"}'
 
-**3 — Apply second PATCH immediately (v2):**
-```bash
-curl -s -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Content-Type: application/merge-patch+json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "If-Match: \"$ETAG_V1\"" \
-  -d '{"planType": "inNetwork"}' | python3 -m json.tool | grep planType
-# Expected: planType = inNetwork (latest)
-```
-
-**4 — Check worker logs to see stale skip:**
-```bash
-docker logs schemaguard-app 2>&1 | grep -E "Skipping stale|Processing event|Index updated" | tail -10
-```
-
-Expected output (v1 event arrives after v2 already written):
-```
-Processing event id=12xvxc345ssdsds-508 eventEtag=<etag_v2>
-Index updated for id=12xvxc345ssdsds-508 children=2
-Skipping stale event for id=12xvxc345ssdsds-508 eventEtag=<etag_v1> currentEtag=<etag_v2>
-```
-*(order depends on worker poll timing; both events will appear)*
-
-**5 — Verify Elastic holds latest state only:**
-```bash
-sleep 1
-curl -s "http://localhost:9200/plans-index/_doc/12xvxc345ssdsds-508" \
-  | python3 -m json.tool | grep planType
-# Expected: "planType": "inNetwork"  — the most recent write, not the stale one
-```
-
-**6 — Verify 412 on bad If-Match:**
-```bash
-curl -s -X PATCH "http://localhost:8080/api/v1/plan/12xvxc345ssdsds-508" \
-  -H "Content-Type: application/merge-patch+json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "If-Match: \"wrong-etag-value\"" \
-  -d '{"planType": "outOfNetwork"}' | python3 -m json.tool | grep -E '"status"|"error"'
-# Expected: "status": 412, "error": "Precondition Failed"
-```
-
----
-
-## PATCH propagation — KV → Queue → Elastic
-
-### 10-step flow
-
-```
-PATCH /api/v1/plan/{objectId}
-  1.  Validate If-Match ETag              → 412 if stale
-  2.  Apply JSON Merge Patch (RFC 7396)   → merged document
-  3.  Validate merged doc (JSON Schema)   → 400 if invalid
-  4.  Write merged doc to KV (Redis)      → new ETag generated
-  5.  Publish PATCH event to RabbitMQ queue
-      fields: operation=PATCH, documentId, etag=<NEW etag>, timestamp
-      (fire-and-forget — API response is NOT blocked by stream write)
-  6.  Return 200 with updated body + ETag header
-      ↓ ~1 s later
-  7.  RabbitMQIndexListener reads PATCH event via RabbitMQ consumer
-  8.  Fetches authoritative document from KV store (not from Elastic)
-  9.  Calls IndexService.indexParent() → Elasticsearch upsert by id
-  10. Re-indexes all linkedPlanServices children; message acknowledged message
-```
-
-### Why re-fetch from KV rather than patch Elastic directly
-
-| Reason | Detail |
-|--------|--------|
-| **No divergence** | Elastic can never hold a value not committed to KV. If KV write failed, no event is published — Elastic is never touched. |
-| **Idempotency** | Re-processing the same event (worker crash + PEL re-claim) always indexes the current KV state — no duplicate or conflicting writes. |
-| **No patch logic in worker** | Worker does not need to understand JSON Merge Patch semantics; it simply indexes whatever is in KV. |
-| **Safe under rapid PATCHes** | If two events are processed out of order, the last one always indexes the most recent committed KV state regardless of which ETag it carried. |
-
-### Key constants
-
-| Name | Value |
-|------|-------|
-| RabbitMQ queue | `schemaguard.index.queue` |
-| Consumer group | `schemaguard.index.exchange` |
-| Elasticsearch index | `plans-index` |
-| Join field | `my_join_field` |
-| Parent join value | `"plan"` (plain string) |
-| Child join value | `{"name":"child","parent":"<parentId>"}` |
-
----
-
-## Cascaded delete — KV + Elastic parent + Elastic children
-
-### Flow
-
-```
-DELETE /api/v1/plan/{objectId}
-  1.  Fetch document from KV store         → 404 if not found
-  2.  Validate If-Match ETag (if provided) → 412 if stale
-  3.  Capture etag before deletion
-  4.  Delete document from KV store (Redis)
-  5.  Publish DELETE event to RabbitMQ queue
-      fields: operation=DELETE, documentId, etag=<last-known etag>, timestamp
-      (fire-and-forget — 204 response is NOT blocked by stream write)
-  6.  Return 204 No Content
-      ↓ ~1 s later
-  7.  RabbitMQIndexListener reads DELETE event via RabbitMQ consumer
-  8.  Calls IndexService.deleteChildren(parentId)
-      → delete_by_query with routing=parentId + parent_id term filter
-      → removes ALL child documents for this parent in one query
-      → idempotent: no children = no error
-  9.  Calls IndexService.deleteParent(parentId)
-      → DELETE /<index>/_doc/<parentId>
-      → 404 from Elastic handled gracefully (already absent = success)
-  10. message acknowledged — message removed from PEL
-```
-
-### Why children must be deleted before the parent
-
-In Elasticsearch's parent-child join model, child documents are co-located with their
-parent on the same shard via `routing=parentId`. Deleting children first ensures:
-
-1. **No orphaned children** — once the parent is gone, children cannot be reached via
-   `parent_id` queries and would silently consume index space forever.
-2. **Correct shard targeting** — `delete_by_query` uses `routing=parentId` to target
-   only the shard where children live. This routing value is available from the event,
-   before the parent document is removed from Elastic.
-3. **Idempotency** — if the worker crashes between step 8 and 9, re-processing the
-   event will attempt `deleteChildren` again (no-op, already gone) then `deleteParent`
-   again (404 from Elastic, handled gracefully). No errors, no duplicates.
-
-### deleteChildren implementation
-
-```
-POST /plans-index/_delete_by_query?routing=<parentId>&refresh=true
-{
-  "query": {
-    "parent_id": {
-      "type": "child",
-      "id": "<parentId>"
-    }
-  }
-}
-```
-
-- `routing=parentId` — targets only the shard where children are stored
-- `parent_id` query — matches only child documents belonging to this parent
-- `refresh=true` — ensures the deletion is visible to subsequent searches immediately
-- Returns `{ "deleted": N }` — N=0 if no children exist (not an error)
-
-### Key constants
-
-| Name | Value |
-|------|-------|
-| RabbitMQ queue | `schemaguard.index.queue` |
-| Consumer group | `schemaguard.index.exchange` |
-| Elasticsearch index | `plans-index` |
-| Join field | `my_join_field` |
-| Child type name | `child` |
-| Parent type name | `plan` |
-
----
-
-## Search API — parent-child Elasticsearch queries
-
-Search endpoints expose Elasticsearch parent-child join queries as REST APIs.
-All endpoints require a valid Google Bearer token (same as `/api/v1/plan/**`).
-
-> **Indexing is asynchronous.** Documents are indexed by `RabbitMQIndexListener` after the API
-> writes to Redis — search results may lag behind the KV store by ~1 s after a write.
-> Always allow the worker to process events before running search queries.
-
-### Endpoints
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/api/v1/search` | Search parent plans, optionally filtered by child properties |
-| `GET` | `/api/v1/search/parent/{id}/children` | Return all children for a given parent |
-
----
-
-### GET /api/v1/search — search parents via has_child
-
-**Query params (all optional):**
-
-| Param | Description |
-|-------|-------------|
-| `childField` | Field name on a child document to filter by |
-| `childValue` | Value to match on `childField` (term + match) |
-| `q` | Free-text search applied to the parent document itself |
-
-`childField` and `childValue` must be provided together or both omitted.
-
-**Example — find parents that have a child with `linkedService.name = "Yearly physical"`:**
-```bash
-curl -s "http://localhost:8080/api/v1/search?childField=linkedService.name&childValue=Yearly%20physical" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
-```
-
-**Example — find parents with a child of objectType = planservice:**
-```bash
+# Search parents by a child field
 curl -s "http://localhost:8080/api/v1/search?childField=objectType&childValue=planservice" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-**Example — list all indexed parents (no filter):**
-```bash
-curl -s "http://localhost:8080/api/v1/search" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
-```
+Every endpoint, parameter, and status code: [docs/api-reference.md](docs/api-reference.md). Full create → index → patch → cascade-delete → stale-event walkthrough: [docs/demo-runbook.md](docs/demo-runbook.md).
 
-**Example — combine parent text search + child filter:**
-```bash
-curl -s "http://localhost:8080/api/v1/search?q=inNetwork&childField=objectType&childValue=planservice" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
-```
-
-**Response shape:**
-```json
-{
-  "count": 1,
-  "results": [
-    {
-      "parentId": "12xvxc345ssdsds-508",
-      "score": 1.0,
-      "source": { "objectId": "...", "planType": "inNetwork", ... },
-      "matchedBy": {
-        "childField": "name",
-        "childValue": "Yearly physical"
-      }
-    }
-  ]
-}
-```
-
----
-
-### GET /api/v1/search/parent/{id}/children — list children via has_parent
-
-Returns all child documents (linkedPlanServices entries) belonging to the given parent.
-Returns `count: 0` with an empty array if the parent has no children — not a 404.
-
-```bash
-curl -s "http://localhost:8080/api/v1/search/parent/12xvxc345ssdsds-508/children" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
-```
-
-**Response shape:**
-```json
-{
-  "parentId": "12xvxc345ssdsds-508",
-  "count": 2,
-  "children": [
-    {
-      "childId": "27283xvx9asdff-504",
-      "source": { "objectId": "27283xvx9asdff-504", "objectType": "planservice", ... }
-    },
-    {
-      "childId": "27283xvx9sdf-507",
-      "source": { "objectId": "27283xvx9sdf-507", "objectType": "planservice", ... }
-    }
-  ]
-}
-```
-
----
-
-### Direct Elasticsearch equivalents (for demo/debugging)
-
-**has_child query — parents with a child matching a field:**
-```bash
-curl -s -X GET "http://localhost:9200/plans-index/_search" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": {
-      "has_child": {
-        "type": "child",
-        "query": { "match": { "name": "Yearly physical" } }
-      }
-    }
-  }' | python3 -m json.tool
-```
-
-**has_parent query — children for a specific parent (with routing):**
-```bash
-curl -s -X GET "http://localhost:9200/plans-index/_search?routing=12xvxc345ssdsds-508" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": {
-      "has_parent": {
-        "parent_type": "plan",
-        "query": { "term": { "objectId": "12xvxc345ssdsds-508" } }
-      }
-    }
-  }' | python3 -m json.tool
-```
-
-**parent_id query — direct child lookup (most efficient, use routing):**
-```bash
-curl -s -X GET "http://localhost:9200/plans-index/_search?routing=12xvxc345ssdsds-508" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": {
-      "parent_id": { "type": "child", "id": "12xvxc345ssdsds-508" }
-    }
-  }' | python3 -m json.tool
-```
-
----
-
-### Routing and join field notes
-
-| Concept | Detail |
-|---------|--------|
-| Join field name | `my_join_field` |
-| Parent relation | `plan` (plain string value) |
-| Child relation | `child` (object: `{"name":"child","parent":"<parentId>"}`) |
-| Child routing | `routing=parentId` — **required** so child queries hit the correct shard |
-| Why routing matters | Child docs are co-located with their parent on the same shard. Without `routing=parentId`, the query scatters to all shards and may miss documents. |
-
----
-
-## queueing (RabbitMQ) — publisher
-
-Every successful write publishes an event to `schemaguard.index.queue`.
-
-| operation | event type | condition |
-|-----------|------------|----------|
-| `POST` | `UPSERT` | 201 only |
-| `PUT` | `UPSERT` | 200 only |
-| `PATCH` | `PATCH` | 200 only |
-| `DELETE` | `DELETE` | 204 only |
-
-```bash
-# inspect stream
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → Get Message(s)
-
-# count events
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Total messages
-
-# check pending (unACKed) messages
-# Open http://localhost:15672 → Queues → schemaguard.index.queue → check Ready/Unacked counts
-```
-
----
-
-## IndexService abstraction
-
-| method | description |
-|--------|-------------|
-| `indexParent` | upsert plan as parent |
-| `indexChild` | upsert child with `routing=parentId` |
-| `patchParent` | re-index parent with patched doc |
-| `deleteParent` | delete parent by id |
-| `deleteChildren` | delete all children via `delete_by_query` |
-
-All idempotent. Health: `curl http://localhost:8080/api/v1/index/health`
-
----
-
-## Elasticsearch parent-child mapping
-
-```json
-{
-  "mappings": {
-    "dynamic": true,
-    "properties": {
-      "objectId":       { "type": "keyword" },
-      "objectType":     { "type": "keyword" },
-      "my_join_field":  { "type": "join", "relations": { "plan": "child" } }
-    }
-  }
-}
-```
-
----
-
-## error contract
-
-```json
-{
-  "timestamp": "2026-02-28T10:15:30Z",
-  "status": 400,
-  "error": "Bad Request",
-  "message": "...",
-  "path": "/api/v1/plan"
-}
-```
-
----
-
-## Google IDP security
-
-OAuth2 Resource Server — Google RS256 tokens validated against `https://www.googleapis.com/oauth2/v3/certs`.
-
-**public:** `/api/v1/schema/**`, `/api/v1/index/**`    **protected:** `/api/v1/plan/**`
-
----
-
-## running tests
+## Testing
 
 ```bash
 ./mvnw test
 ```
 
-test profile: `InMemoryKeyValueStore`, `NoOpIndexEventPublisher`, no Redis/ES/token needed.
+Runs under the `test` Spring profile — `InMemoryKeyValueStore` in place of Redis, `NoOpIndexEventPublisher` in place of RabbitMQ (RabbitMQ autoconfiguration is excluded), and `@WithMockUser` in place of real Google tokens. No Docker services are required.
 
----
+Current coverage:
+- **Controller/integration** (`PlanCrudIntegrationTest`, MockMvc): create → 201, get → 200/304, delete → 204, 404 on missing plan, 409 on duplicate create, precondition rejection on stale `If-Match`.
+- **JSON Merge Patch unit tests** (`MergePatchUnitTest`): scalar overwrite, null-removes-field, new-field addition, nested-object merge, non-object patch replaces target, empty patch is a no-op.
+- **Schema validation** (`SchemaValidatorTest`): valid payload passes, missing required field fails with reported errors.
+- **KV store** (`InMemoryKeyValueStoreTest`): create/get/exists/delete lifecycle, including duplicate-create rejection.
+- **Async consumer** (`RabbitMQIndexListenerTest`): a stale event (older etag than the current Redis state) is skipped and never reaches the index service; a fresh event indexes the parent and every child; `DELETE` removes children before the parent regardless of etag.
 
-## architecture
+Run `./mvnw --batch-mode clean verify` to also produce a packaged jar (same as CI).
+
+## Consistency and failure model
+
+The consumer prevents an older queued event from overwriting a newer Redis-backed version — verified by `RabbitMQIndexListenerTest`. Elasticsearch remains eventually consistent with Redis **while events are successfully published and processed**. That qualifier matters: publishing is fire-and-forget with no outbox and no publisher confirms, so if RabbitMQ is unreachable at write time, the event is dropped and Elasticsearch is not corrected until the next successful write to that document. The consumer has no configured retry/backoff or dead-letter queue — a permanently-failing message is nacked and requeued indefinitely rather than landing somewhere inspectable. Delivery is at-least-once, not exactly-once; indexing operations are idempotent upserts, so redelivery is safe but not deduplicated.
+
+Full breakdown of what happens when Redis, RabbitMQ, or Elasticsearch is unavailable: [docs/failure-handling.md](docs/failure-handling.md). ETag mechanics and the stale-event sequence diagram: [docs/consistency-model.md](docs/consistency-model.md).
+
+## Project structure
 
 ```
 SchemaGuard/
-├── compose.yaml                                       ← Redis + Elasticsearch + app
+├── compose.yaml                    ← Redis + RabbitMQ + Elasticsearch + app
+├── Dockerfile
 ├── src/main/java/com/schemaguard/
-│   ├── SchemaGuardApplication.java                  ← @EnableScheduling added
-│   ├── config/
-│   │   ├── AppConfig.java
-│   │   ├── ElasticsearchConfig.java
-│   │   ├── RabbitMQConfig.java
-│   │   ├── RedisConfig.java
-│   │   └── SecurityConfig.java
-│   ├── elastic/
-│   │   ├── ElasticsearchHealthCheck.java
-│   │   ├── ElasticsearchIndexService.java
-│   │   ├── IndexService.java
-│   │   ├── PlanIndexConstants.java
-│   │   ├── PlanIndexInitializer.java
-│   │   └── PlanRoutingStrategy.java
-│   ├── queue/
-│   │   ├── IndexEvent.java
-│   │   ├── IndexEventOperation.java
-│   │   ├── IndexEventPublisher.java
-│   │   ├── RabbitMQEventPublisher.java
-│   │   ├── RabbitMQIndexListener.java              ← @RabbitListener consumer
-│   │   ├── NoOpIndexEventPublisher.java
-│   │   ├── PlanDocumentSplitter.java              ← extracts linkedPlanServices as children
-│   ├── controller/
-│   │   ├── IndexAdminController.java
-│   │   ├── PlanController.java
-│   │   └── SchemaController.java
-│   ├── exception/
-│   ├── model/
-│   ├── security/
-│   ├── store/
-│   ├── util/
-│   └── validation/
+│   ├── config/                     ← Rabbit/Redis/Elasticsearch/Security wiring
+│   ├── controller/                 ← Plan, Schema, Search, IndexAdmin REST endpoints
+│   ├── elastic/                    ← IndexService, routing, parent-child search
+│   ├── queue/                      ← IndexEvent, publisher, RabbitMQIndexListener
+│   ├── store/                      ← KeyValueStore (Redis / in-memory)
+│   ├── security/                   ← JWT claims logging, security error contract
+│   ├── validation/                 ← JSON Schema validator
+│   └── exception/                  ← Global exception → ApiError mapping
 ├── src/main/resources/
+│   ├── schemas/plan-schema.json    ← the JSON Schema served and enforced
 │   ├── application.properties
-│   └── application-redis.properties               ← worker config keys added
-└── src/test/resources/application-test.properties
+│   └── application-redis.properties
+├── src/test/java/com/schemaguard/  ← see Testing above
+├── samples/                        ← example valid/invalid plan payloads
+└── docs/                           ← architecture, API reference, demo, consistency/failure model
 ```
+
+## Limitations and future improvements
+
+**Current limitations:**
+- Redis is the sole authoritative store — there is no replication or backup story documented or configured here.
+- The Redis write and the RabbitMQ publish are two separate, non-transactional steps; a crash between them loses the index update for that write.
+- No RabbitMQ publisher confirms, consumer retry/backoff, or dead-letter queue are configured — see [docs/failure-handling.md](docs/failure-handling.md).
+- Elasticsearch runs as a single node with security disabled — a local/demo configuration, not a production one.
+- Authentication depends on a Google OAuth2 Client ID being configured externally; there is no offline/local auth mode.
+- Backward/forward JSON Schema version compatibility is not implemented — schema changes are not checked against previously stored documents.
+- The Docker Compose setup and demo tooling are built for local development and demonstration, not production deployment.
+
+**Possible future improvements:**
+- Transactional outbox pattern for the Redis-write-then-publish step.
+- RabbitMQ publisher confirms and a bounded consumer retry policy with a dead-letter queue.
+- Schema-version compatibility analysis for evolving the plan schema safely.
+- Testcontainers-based integration tests against real Redis/RabbitMQ/Elasticsearch.
+- Observability via Micrometer/OpenTelemetry.
+- Kubernetes manifests or another production deployment path.
+- Automated load and failure-injection testing.
+
+## Additional documentation
+
+- [Architecture](docs/architecture.md) — components, diagrams, parent-child indexing
+- [API Reference](docs/api-reference.md) — every endpoint, parameter, and error case
+- [Consistency Model](docs/consistency-model.md) — ETag mechanics and stale-event detection
+- [Failure Handling](docs/failure-handling.md) — what happens when Redis/RabbitMQ/Elasticsearch are down
+- [Demo Runbook](docs/demo-runbook.md) — full end-to-end walkthrough
+- [Local Development](docs/local-development.md) — environment variables, running without Docker, getting a token
+
+## License
+
+[MIT](LICENSE)
