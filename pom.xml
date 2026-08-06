@@ -9,7 +9,7 @@
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com.schemaguard</groupId>
-    <artifactId>SchemaGuard</artifactId>
+    <artifactId>schema-guard</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>SchemaGuard</name>
     <description>Event-driven Spring Boot service for validating and managing nested healthcare-plan documents, backed by Redis, indexed into Elasticsearch via RabbitMQ</description>
@@ -23,6 +23,7 @@
     <developers>
         <developer>
             <id>PragatiAN1109</id>
+            <name>Pragati Narote</name>
             <url>https://github.com/PragatiAN1109</url>
         </developer>
     </developers>
