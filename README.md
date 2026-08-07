@@ -55,27 +55,12 @@ SchemaGuard's answer is separation of concerns: Redis is the only thing the API 
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    Client[Client]
-    API[Spring Boot API]
-    Auth[JWT + Schema Validation]
-    Redis[(Redis)]
-    MQ{{RabbitMQ}}
-    Worker[Index Listener]
-    ES[(Elasticsearch)]
+<p align="center">
+  <img src="docs/architecture-diagram.svg" alt="SchemaGuard request and indexing flow: Client, Spring Boot API, JWT + Schema validation, and Redis run synchronously as part of the request; RabbitMQ and the Index Listener update Elasticsearch asynchronously afterward." width="900">
+</p>
 
-    Client --> API
-    API --> Auth
-    API --> Redis
-    API -. event .-> MQ
-    MQ -. async .-> Worker
-    Worker --> Redis
-    Worker --> ES
-```
+The publish call itself is a synchronous, fire-and-forget method call — it's drawn as the start of the asynchronous band because it's the hand-off point into the async indexing path; the HTTP response doesn't wait on anything past it.
 
-- **Solid arrows** are synchronous — part of the HTTP request/response.
-- **Dashed arrows** are asynchronous — they happen after the response has already been returned. The publish call itself is a synchronous, fire-and-forget method call; it's drawn dashed because it's the entry point into the async indexing path.
 - Redis is the authoritative application store in the current implementation. The API never writes to Elasticsearch directly.
 - Elasticsearch is a derived, eventually consistent search index. The listener re-fetches current state from Redis before indexing — it never trusts the event payload's document content.
 - JWT validation and JSON Schema validation both happen before a write is accepted.
@@ -516,7 +501,7 @@ Run `./mvnw --batch-mode clean verify` to also produce a packaged jar (same as C
 ```text
 SchemaGuard/
 ├── .github/workflows/               ← CI (Maven build + test)
-├── docs/                            ← get-token.html, Postman collection
+├── docs/                            ← architecture diagram, get-token.html, Postman collection
 ├── samples/                         ← example valid/invalid plan payloads
 ├── src/main/java/com/schemaguard/
 │   ├── config/                      ← Rabbit/Redis/Elasticsearch/Security wiring

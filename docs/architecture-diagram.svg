@@ -1,0 +1,109 @@
+<svg width="1000" height="575" viewBox="0 0 1000 575" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">
+  <title>SchemaGuard request and indexing flow</title>
+  <desc>Client requests flow synchronously through the Spring Boot API, JWT/schema validation, and Redis. On a successful write, an event is published to RabbitMQ; an Index Listener consumes it asynchronously, re-checks Redis, and updates Elasticsearch.</desc>
+
+  <defs>
+    <marker id="arrowSolid" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1 1 L9 5 L1 9 Z" fill="#334155"/>
+    </marker>
+    <marker id="arrowDash" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1 1 L9 5 L1 9 Z" fill="#B45309"/>
+    </marker>
+
+    <symbol id="ic-user" viewBox="0 0 56 56">
+      <circle cx="28" cy="19" r="9" fill="#fff"/>
+      <path d="M10 47 C10 34 19 29 28 29 C37 29 46 34 46 47 Z" fill="#fff"/>
+    </symbol>
+    <symbol id="ic-code" viewBox="0 0 56 56">
+      <path d="M22 15 L10 28 L22 41" fill="none" stroke="#fff" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M34 15 L46 28 L34 41" fill="none" stroke="#fff" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="ic-lock" viewBox="0 0 56 56">
+      <rect x="14" y="26" width="28" height="20" rx="4" fill="#fff"/>
+      <path d="M19 26 V19 a9 9 0 0 1 18 0 V26" fill="none" stroke="#fff" stroke-width="4.2"/>
+      <circle cx="28" cy="36" r="2.6" fill="#1E293B"/>
+    </symbol>
+    <symbol id="ic-db" viewBox="0 0 56 56">
+      <ellipse cx="28" cy="14" rx="15.5" ry="5.6" fill="#fff"/>
+      <path d="M12.5 14 V40 a15.5 5.6 0 0 0 31 0 V14" fill="none" stroke="#fff" stroke-width="3.2"/>
+      <path d="M12.5 27 a15.5 5.6 0 0 0 31 0" fill="none" stroke="#fff" stroke-width="2.8"/>
+    </symbol>
+    <symbol id="ic-queue" viewBox="0 0 56 56">
+      <rect x="9" y="16" width="10" height="24" rx="2.5" fill="#fff"/>
+      <rect x="23" y="16" width="10" height="24" rx="2.5" fill="#fff" opacity="0.8"/>
+      <rect x="37" y="16" width="10" height="24" rx="2.5" fill="#fff" opacity="0.55"/>
+    </symbol>
+    <symbol id="ic-refresh" viewBox="0 0 56 56">
+      <path d="M42 22 A15.5 15.5 0 1 0 43 33" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+      <path d="M42 13 L42 23 L32 23 Z" fill="#fff"/>
+    </symbol>
+    <symbol id="ic-search" viewBox="0 0 56 56">
+      <circle cx="24" cy="24" r="12" fill="none" stroke="#fff" stroke-width="4.4"/>
+      <line x1="33.5" y1="33.5" x2="45" y2="45" stroke="#fff" stroke-width="4.4" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+
+  <rect x="0" y="0" width="1000" height="575" fill="#FFFFFF"/>
+  <rect x="10" y="10" width="980" height="555" rx="16" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <text x="500" y="38" font-size="24" font-weight="800" fill="#1E3A8A" text-anchor="middle">SchemaGuard &#8212; Request &amp; Indexing Flow</text>
+  <text x="500" y="59" font-size="13" fill="#64748B" text-anchor="middle">The synchronous path always returns a response before Elasticsearch is ever touched</text>
+
+  <!-- ===== Row 1: synchronous band ===== -->
+  <rect x="40" y="70" width="920" height="193" rx="14" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+  <rect x="55" y="82" width="272" height="27" rx="13.5" fill="#1E3A8A"/>
+  <text x="191" y="100" font-size="11.5" font-weight="700" fill="#fff" text-anchor="middle" letter-spacing="0.5">SYNCHRONOUS &#8212; PART OF THE REQUEST</text>
+
+  <line x1="168" y1="165" x2="362" y2="165" stroke="#334155" stroke-width="2.5" marker-end="url(#arrowSolid)"/>
+  <line x1="418" y1="165" x2="612" y2="165" stroke="#334155" stroke-width="2.5" marker-end="url(#arrowSolid)"/>
+  <line x1="668" y1="165" x2="862" y2="165" stroke="#334155" stroke-width="2.5" marker-end="url(#arrowSolid)"/>
+
+  <g transform="translate(112,137)"><rect width="56" height="56" rx="14" fill="#64748B"/><use href="#ic-user" width="56" height="56"/></g>
+  <g transform="translate(362,137)"><rect width="56" height="56" rx="14" fill="#6DB33F"/><use href="#ic-code" width="56" height="56"/></g>
+  <g transform="translate(612,137)"><rect width="56" height="56" rx="14" fill="#4285F4"/><use href="#ic-lock" width="56" height="56"/></g>
+  <g transform="translate(862,137)"><rect width="56" height="56" rx="14" fill="#DC382D"/><use href="#ic-db" width="56" height="56"/></g>
+
+  <g font-size="13" font-weight="700" fill="#1E293B" text-anchor="middle">
+    <text x="140" y="213">CLIENT</text>
+    <text x="390" y="213">SPRING BOOT</text>
+    <text x="390" y="228">API</text>
+    <text x="640" y="213">JWT +</text>
+    <text x="640" y="228">SCHEMA</text>
+    <text x="890" y="213">REDIS</text>
+    <text x="890" y="228" font-size="11" font-weight="600" fill="#64748B">authoritative</text>
+  </g>
+
+  <!-- ===== Connector: Redis -> RabbitMQ (async publish) ===== -->
+  <path d="M890 193 L890 290 L215 290 L215 387" fill="none" stroke="#B45309" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#arrowDash)"/>
+  <text x="552" y="282" font-size="12.5" font-style="italic" fill="#92400E" text-anchor="middle">publish IndexEvent &#8212; fire-and-forget</text>
+
+  <!-- ===== Row 2: asynchronous band ===== -->
+  <rect x="40" y="320" width="920" height="193" rx="14" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1.5" stroke-dasharray="0"/>
+  <rect x="55" y="332" width="278" height="27" rx="13.5" fill="#B45309"/>
+  <text x="194" y="350" font-size="11.5" font-weight="700" fill="#fff" text-anchor="middle" letter-spacing="0.5">ASYNCHRONOUS &#8212; AFTER THE RESPONSE</text>
+
+  <line x1="243" y1="415" x2="472" y2="415" stroke="#B45309" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#arrowDash)"/>
+  <line x1="528" y1="415" x2="757" y2="415" stroke="#334155" stroke-width="2.5" marker-end="url(#arrowSolid)"/>
+
+  <g transform="translate(187,387)"><rect width="56" height="56" rx="14" fill="#FF6600"/><use href="#ic-queue" width="56" height="56"/></g>
+  <g transform="translate(472,387)"><rect width="56" height="56" rx="14" fill="#7C3AED"/><use href="#ic-refresh" width="56" height="56"/></g>
+  <g transform="translate(757,387)"><rect width="56" height="56" rx="14" fill="#00BFB3"/><use href="#ic-search" width="56" height="56"/></g>
+
+  <g font-size="13" font-weight="700" fill="#1E293B" text-anchor="middle">
+    <text x="215" y="463">RABBITMQ</text>
+    <text x="215" y="478" font-size="11" font-weight="600" fill="#64748B">work queue</text>
+    <text x="500" y="463">INDEX</text>
+    <text x="500" y="478">LISTENER</text>
+    <text x="785" y="463">ELASTIC-</text>
+    <text x="785" y="478">SEARCH</text>
+  </g>
+
+  <!-- ===== Legend + caption ===== -->
+  <g font-size="12.5" font-weight="600">
+    <line x1="120" y1="536" x2="150" y2="536" stroke="#334155" stroke-width="2.5"/>
+    <text x="158" y="540" fill="#334155">synchronous</text>
+    <line x1="290" y1="536" x2="320" y2="536" stroke="#B45309" stroke-width="2.5" stroke-dasharray="6 5"/>
+    <text x="328" y="540" fill="#92400E">asynchronous</text>
+  </g>
+  <text x="500" y="560" font-size="12" font-style="italic" fill="#475569" text-anchor="middle">Index Listener re-fetches the current Redis document and re-checks its ETag / existence before writing to Elasticsearch &#8212; never the event payload.</text>
+</svg>
