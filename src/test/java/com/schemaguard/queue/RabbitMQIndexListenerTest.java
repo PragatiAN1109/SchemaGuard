@@ -19,8 +19,8 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 /**
- * Covers the stale-event guard described in docs/consistency-model.md: an
- * event carrying an older etag than the document's current state in the
+ * Covers the stale-event guard described in the README's Consistency Model
+ * section: an event carrying an older etag than the document's current state in the
  * KV store must never reach the index service, regardless of delivery order.
  */
 class RabbitMQIndexListenerTest {
