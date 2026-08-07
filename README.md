@@ -56,7 +56,7 @@ SchemaGuard's answer is separation of concerns: Redis is the only thing the API 
 ## Architecture
 
 <p align="center">
-  <img src="docs/architecture-diagram.svg" alt="SchemaGuard request and indexing flow: Client, Spring Boot API, JWT + Schema validation, and Redis run synchronously as part of the request; RabbitMQ and the Index Listener update Elasticsearch asynchronously afterward." width="900">
+  <img src="docs/architecture-diagram.svg" alt="SchemaGuard request and indexing flow: Client, Spring Boot API, and Auth + Validation run synchronously into Redis as part of the request; RabbitMQ and the Indexing Consumer update Elasticsearch asynchronously afterward." width="900">
 </p>
 
 The publish call itself is a synchronous, fire-and-forget method call — it's drawn as the start of the asynchronous band because it's the hand-off point into the async indexing path; the HTTP response doesn't wait on anything past it.

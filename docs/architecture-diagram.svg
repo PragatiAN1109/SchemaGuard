@@ -67,15 +67,16 @@
     <text x="140" y="213">CLIENT</text>
     <text x="390" y="213">SPRING BOOT</text>
     <text x="390" y="228">API</text>
-    <text x="640" y="213">JWT +</text>
-    <text x="640" y="228">SCHEMA</text>
+    <text x="640" y="213">AUTH +</text>
+    <text x="640" y="228">VALIDATION</text>
+    <text x="640" y="241" font-size="9.5" font-weight="600" fill="#64748B">JWT &#8226; JSON Schema</text>
     <text x="890" y="213">REDIS</text>
     <text x="890" y="228" font-size="11" font-weight="600" fill="#64748B">authoritative</text>
   </g>
 
   <!-- ===== Connector: Redis -> RabbitMQ (async publish) ===== -->
   <path d="M890 193 L890 290 L215 290 L215 387" fill="none" stroke="#B45309" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#arrowDash)"/>
-  <text x="552" y="282" font-size="12.5" font-style="italic" fill="#92400E" text-anchor="middle">publish IndexEvent &#8212; fire-and-forget</text>
+  <text x="552" y="282" font-size="12.5" font-style="italic" fill="#92400E" text-anchor="middle">publish IndexEvent &#8212; asynchronous</text>
 
   <!-- ===== Row 2: asynchronous band ===== -->
   <rect x="40" y="320" width="920" height="193" rx="14" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1.5" stroke-dasharray="0"/>
@@ -92,8 +93,8 @@
   <g font-size="13" font-weight="700" fill="#1E293B" text-anchor="middle">
     <text x="215" y="463">RABBITMQ</text>
     <text x="215" y="478" font-size="11" font-weight="600" fill="#64748B">work queue</text>
-    <text x="500" y="463">INDEX</text>
-    <text x="500" y="478">LISTENER</text>
+    <text x="500" y="463">INDEXING</text>
+    <text x="500" y="478">CONSUMER</text>
     <text x="785" y="463">ELASTIC-</text>
     <text x="785" y="478">SEARCH</text>
   </g>
@@ -105,5 +106,5 @@
     <line x1="290" y1="536" x2="320" y2="536" stroke="#B45309" stroke-width="2.5" stroke-dasharray="6 5"/>
     <text x="328" y="540" fill="#92400E">asynchronous</text>
   </g>
-  <text x="500" y="560" font-size="12" font-style="italic" fill="#475569" text-anchor="middle">Index Listener re-fetches the current Redis document and re-checks its ETag / existence before writing to Elasticsearch &#8212; never the event payload.</text>
+  <text x="500" y="560" font-size="12" font-style="italic" fill="#475569" text-anchor="middle">Consumer re-fetches current Redis state and re-checks ETag/existence before updating Elasticsearch, preventing stale events from overwriting newer data.</text>
 </svg>
