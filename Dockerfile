@@ -22,7 +22,7 @@ WORKDIR /app
 RUN groupadd -r schemaguard && useradd -r -g schemaguard schemaguard
 USER schemaguard
 
-COPY --from=build /app/target/SchemaGuard-0.0.1-SNAPSHOT.jar app.jar
+COPY --from=build /app/target/schema-guard-0.0.1-SNAPSHOT.jar app.jar
 
 EXPOSE 8080
 

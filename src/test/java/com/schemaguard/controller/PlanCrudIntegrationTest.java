@@ -132,4 +132,97 @@ class PlanCrudIntegrationTest {
                 .content(VALID_PLAN))
                 .andExpect(status().isConflict());
     }
+
+    @Test
+    void putPlan_withStaleIfMatch_returns412() throws Exception {
+        mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(VALID_PLAN));
+
+        mockMvc.perform(put("/api/v1/plan/12xvxc345ssdsds-508")
+                .with(jwt())
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("If-Match", "\"wrong-etag-value\"")
+                .content(VALID_PLAN))
+                .andExpect(status().isPreconditionFailed());
+    }
+
+    @Test
+    void patchPlan_withStaleIfMatch_returns412() throws Exception {
+        mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(VALID_PLAN));
+
+        mockMvc.perform(patch("/api/v1/plan/12xvxc345ssdsds-508")
+                .with(jwt())
+                .contentType("application/merge-patch+json")
+                .header("If-Match", "\"wrong-etag-value\"")
+                .content("{\"planType\": \"outOfNetwork\"}"))
+                .andExpect(status().isPreconditionFailed());
+    }
+
+    @Test
+    void deletePlan_withStaleIfMatch_returns412() throws Exception {
+        mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(VALID_PLAN));
+
+        mockMvc.perform(delete("/api/v1/plan/12xvxc345ssdsds-508")
+                .with(jwt())
+                .header("If-Match", "\"wrong-etag-value\""))
+                .andExpect(status().isPreconditionFailed());
+    }
+
+    @Test
+    void rapidConsecutivePatches_lastWriteWins() throws Exception {
+        // Uses its own objectId (distinct from VALID_PLAN's) so this test's etag
+        // chain can't be disturbed by other tests sharing the same KV store instance.
+        String objectId = "rapid-patch-plan-999";
+        String plan = VALID_PLAN.replaceFirst(
+                "\"objectId\": \"12xvxc345ssdsds-508\"",
+                "\"objectId\": \"" + objectId + "\"");
+
+        var createResult = mockMvc.perform(post("/api/v1/plan")
+                .with(jwt())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(plan))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String etagV0 = createResult.getResponse().getHeader("ETag");
+
+        var patchV1Result = mockMvc.perform(patch("/api/v1/plan/" + objectId)
+                .with(jwt())
+                .contentType("application/merge-patch+json")
+                .header("If-Match", etagV0)
+                .content("{\"planType\": \"outOfNetwork\"}"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        String etagV1 = patchV1Result.getResponse().getHeader("ETag");
+
+        mockMvc.perform(patch("/api/v1/plan/" + objectId)
+                .with(jwt())
+                .contentType("application/merge-patch+json")
+                .header("If-Match", etagV1)
+                .content("{\"planType\": \"inNetwork\"}"))
+                .andExpect(status().isOk());
+
+        // An attempt to write against the now-superseded v1 etag must be rejected —
+        // this is the precondition that ultimately makes the async stale-event guard possible.
+        mockMvc.perform(patch("/api/v1/plan/" + objectId)
+                .with(jwt())
+                .contentType("application/merge-patch+json")
+                .header("If-Match", etagV1)
+                .content("{\"planType\": \"outOfNetwork\"}"))
+                .andExpect(status().isPreconditionFailed());
+
+        mockMvc.perform(get("/api/v1/plan/" + objectId)
+                .with(jwt()))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"planType\":\"inNetwork\"")));
+    }
 }
